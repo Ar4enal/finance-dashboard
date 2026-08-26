@@ -1,0 +1,71 @@
+{
+  "app": "finance-workbench",
+  "version": 1,
+  "exported_at": "2026-08-24 18:53:32",
+  "watchlist": [
+    {
+      "id": 16,
+      "market": "FUND",
+      "code": "161725",
+      "name": "招商中证白酒",
+      "created_at": "2026-08-24 16:29:19"
+    },
+    {
+      "id": 17,
+      "market": "FUND",
+      "code": "005827",
+      "name": "易方达蓝筹精选",
+      "created_at": "2026-08-24 16:29:19"
+    },
+    {
+      "id": 18,
+      "market": "FUND",
+      "code": "161726",
+      "name": "招商国证生物医药",
+      "created_at": "2026-08-24 16:29:19"
+    },
+    {
+      "id": 19,
+      "market": "A",
+      "code": "sh600036",
+      "name": "招商银行",
+      "created_at": "2026-08-24 17:06:37"
+    },
+    {
+      "id": 20,
+      "market": "FUND",
+      "code": "110022",
+      "name": "易方达消费行业股票",
+      "created_at": "2026-08-24 17:06:50"
+    },
+    {
+      "id": 21,
+      "market": "A",
+      "code": "600519",
+      "name": "600519",
+      "created_at": "2026-08-24 17:11:07"
+    }
+  ],
+  "transactions": [
+    {
+      "id": 11,
+      "market": "HK",
+      "code": "00700",
+      "side": "BUY",
+      "quantity": 200.0,
+      "price": 410.0,
+      "fee": 0.0,
+      "trans_date": "2026-01-01",
+      "note": "",
+      "created_at": "2026-08-24 17:08:56"
+    }
+  ],
+  "snapshots": [],
+  "gold_holding": {
+    "grams": 50.0,
+    "cost_price": 520.0,
+    "updated_at": "2026-08-24 18:52:29"
+  },
+  "asset_profit": [],
+  "position_override": []
+}
