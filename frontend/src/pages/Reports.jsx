@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { api } from '../api.js'
+import { useKline } from '../kline.jsx'
 
 const fmt = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d }))
 const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
@@ -8,6 +9,7 @@ const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 export default function Reports() {
   const [positions, setPositions] = useState([])
   const [txns, setTxns] = useState([])
+  const { openKline } = useKline()
 
   const load = () => {
     Promise.all([api.positions(), api.transactions()])
@@ -42,7 +44,8 @@ export default function Reports() {
           <thead><tr><th>名称</th><th>市场</th><th className="num">数量</th><th className="num">市值</th><th className="num">成本</th><th className="num">盈亏</th><th className="num">收益率</th></tr></thead>
           <tbody>
             {positions.map(p => (
-              <tr key={p.code}>
+              <tr key={p.code} style={{ cursor: 'pointer' }} onClick={() => openKline(p.market, p.code, p.name)}
+                title="点击查看 K 线行情">
                 <td>{p.name || p.code}</td>
                 <td><span className="badge badge-a">{p.market}</span></td>
                 <td className="num">{fmt(p.quantity, 0)}</td>

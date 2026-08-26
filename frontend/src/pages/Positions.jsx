@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import ProfitDisplay from '../components/ProfitDisplay.jsx'
 import { api } from '../api.js'
 import { useInputHistory, clearHistory, loadHistory } from '../history.js'
+import { useKline } from '../kline.jsx'
 
 // 带历史记忆的输入框：记忆最近 5 个值，点击下拉可快速回填
 function HistInput({ field, type = 'text', value, onChange, placeholder, className = 'form-input', style, ...rest }) {
@@ -73,6 +74,7 @@ export default function Positions() {
   const [addPosForm, setAddPosForm] = useState({ market: 'A股', code: '', amount: '', pnl: '' })
   const [addPosResult, setAddPosResult] = useState(null)  // 后端返回的计算结果
   const [addPosLoading, setAddPosLoading] = useState(false)
+  const { openKline } = useKline()
   // 批量导入：addPosMode='single'（单条）| 'batch'（批量）；batchText 为多行文本；batchResults 为逐条结果
   const [addPosMode, setAddPosMode] = useState('single')
   const [addPosBatchMarket, setAddPosBatchMarket] = useState('A股')
@@ -268,8 +270,9 @@ export default function Positions() {
       const kb = (b.market || '') + ':' + (b.code || '')
       return ka < kb ? -1 : ka > kb ? 1 : 0
     })
-    // 置顶优先（a 置顶 → 返回 1，a 排前面）
-    list.sort((a, b) => Number(!!pinnedSet[a.market + ':' + a.code]) - Number(!!pinnedSet[b.market + ':' + b.code]))
+    // 置顶优先：置顶的产品永远排在列表最前面。
+    // 比较函数返回负数时 a 排前面；a 置顶(b 不置顶)应让 a 在前 → pinnedB - pinnedA。
+    list.sort((a, b) => Number(!!pinnedSet[b.market + ':' + b.code]) - Number(!!pinnedSet[a.market + ':' + a.code]))
     return list
   })()
 
@@ -439,7 +442,8 @@ export default function Positions() {
 
       <div className="pos-grid">
         {pagePositions.map(p => (
-          <div key={p.code + p.market} className="pos-card">
+          <div key={p.code + p.market} className="pos-card clickable" style={{ cursor: 'pointer' }}
+            title="点击查看 K 线行情" onClick={() => openKline(p.market, p.code, p.name)}>
             <div className="top">
               {pinnedSet[p.market + ':' + p.code] && <span style={{ marginRight: 4 }} title="已置顶">📌</span>}
               <span className="name">{p.name || p.code}</span><span className="code">{p.code} · {p.market}</span>
@@ -479,7 +483,8 @@ export default function Positions() {
           <tbody>
             {pagePositions.map(p => (
               <tr key={p.code + p.market}>
-                <td>
+                <td style={{ cursor: 'pointer' }} onClick={() => openKline(p.market, p.code, p.name)}
+                  title="点击查看 K 线行情">
                   {pinnedSet[p.market + ':' + p.code] && <span style={{ marginRight: 6 }} title="已置顶">📌</span>}
                   {p.name || p.code}
                   {p.overridden && <span className="badge badge-gold" style={{ marginLeft: 6 }}>已编辑</span>}

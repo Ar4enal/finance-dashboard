@@ -2,6 +2,7 @@ import React, { useState, useEffect, useContext } from 'react'
 import EChart from '../components/EChart.jsx'
 import { api } from '../api.js'
 import { RefreshContext } from '../refresh.js'
+import { useKline } from '../kline.jsx'
 
 const fmt = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d }))
 const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
@@ -15,6 +16,7 @@ export default function Analysis() {
   const [perf, setPerf] = useState(null)  // 净值曲线（每日快照）
   const [allocModal, setAllocModal] = useState(null)  // 饼图点击弹窗：对应分组的 allocation 项
   const refreshSec = useContext(RefreshContext)
+  const { openKline } = useKline()
 
   // 点击饼图元素 → 弹出该分组下的持仓明细
   const onPieClick = (params) => {
@@ -125,7 +127,8 @@ export default function Analysis() {
               <thead><tr><th>产品代码</th><th>产品名称</th><th className="num">市值</th><th className="num">占该类型</th></tr></thead>
               <tbody>
                 {allocModal.items.map((it, i) => (
-                  <tr key={i}>
+                  <tr key={i} style={{ cursor: 'pointer' }} onClick={() => openKline(it.market, it.code, it.name)}
+                    title="点击查看 K 线行情">
                     <td>{it.code}</td>
                     <td>{it.name}</td>
                     <td className="num">{money(it.market_value)}</td>

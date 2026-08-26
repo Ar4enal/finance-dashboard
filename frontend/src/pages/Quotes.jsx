@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import KlineChart from '../components/KlineChart.jsx'
 import PenetrationView from '../components/PenetrationView.jsx'
 import { RefreshContext } from '../refresh.js'
+import { useKline } from '../kline.jsx'
 import { useInputHistory, clearHistory, loadHistory } from '../history.js'
 
 // 带历史记忆的输入框
@@ -61,8 +62,8 @@ export default function Quotes() {
   const [fundPen, setFundPen] = useState(null)  // 详情弹窗的穿透数据
   const [penLoading, setPenLoading] = useState(false)
   const [penetrations, setPenetrations] = useState([])  // 持仓基金穿透概览
-  const [kline, setKline] = useState(null)
   const [watchlist, setWatchlist] = useState([])
+  const { openKline } = useKline()
   const [search, setSearch] = useState('')
   const [gold, setGold] = useState(null)
   // 指数配置（用户可自定义选择/新增/删除，后端持久化）
@@ -169,7 +170,6 @@ export default function Quotes() {
     return () => clearInterval(t)
   }, [refreshSec, fetchIndex, fetchWatchlist, fetchGold, fetchPenetrations, fetchSector])
 
-  const openKline = (market, code, name) => setKline({ market, code, name })
   const openFund = async (code) => {
     try {
       setFundPen(null)
@@ -526,19 +526,6 @@ export default function Quotes() {
               <button className="btn-ghost" onClick={() => setShowAddIndex(false)}>取消</button>
               <button className="btn" onClick={addIndex}>添加指数</button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* K线模态 */}
-      {kline && (
-        <div className="modal show" onClick={() => setKline(null)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()} style={{ width: 760 }}>
-            <div className="modal-head">
-              <h3>{kline.name} ({kline.code}) · 日K · MA · MACD</h3>
-              <button className="modal-close" onClick={() => setKline(null)}>×</button>
-            </div>
-            <KlineChart market={kline.market} code={kline.code} />
           </div>
         </div>
       )}

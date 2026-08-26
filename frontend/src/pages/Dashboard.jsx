@@ -3,6 +3,7 @@ import EChart from '../components/EChart.jsx'
 import ProfitDisplay from '../components/ProfitDisplay.jsx'
 import { api } from '../api.js'
 import { RefreshContext } from '../refresh.js'
+import { useKline } from '../kline.jsx'
 
 const fmt = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d }))
 const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
@@ -15,6 +16,7 @@ export default function Dashboard() {
   const [summary, setSummary] = useState(null)
   const [positions, setPositions] = useState([])
   const refreshSec = useContext(RefreshContext)
+  const { openKline } = useKline()
 
   const load = () => {
     api.portfolioSummary().then(setSummary).catch(() => {})
@@ -77,8 +79,17 @@ export default function Dashboard() {
           <div className="card-title">持仓概览</div>
           {positions.length === 0 ? <div className="empty">暂无持仓，请先录入交易</div> : (
             <div>
-              {positions.map(p => (
-                <div key={p.code + p.market} className="pos-card" style={{ marginBottom: 10 }}>
+              {positions.slice().sort((a, b) => {
+                // 持仓概览按市值由多到少排序；市值为 null（清仓/行情不可用）排最后
+                const va = a.market_value == null ? -Infinity : a.market_value
+                const vb = b.market_value == null ? -Infinity : b.market_value
+                if (vb !== va) return vb - va
+                // 次级稳定键：名称，保证顺序稳定
+                const ka = (a.name || a.code || ''), kb = (b.name || b.code || '')
+                return ka < kb ? -1 : ka > kb ? 1 : 0
+              }).map(p => (
+                <div key={p.code + p.market} className="pos-card clickable" style={{ marginBottom: 10, cursor: 'pointer' }}
+                  title="点击查看 K 线行情" onClick={() => openKline(p.market, p.code, p.name)}>
                   <div className="top">
                     <span className="name">{p.name || p.code}</span>
                     <span className="code">{p.market}</span>

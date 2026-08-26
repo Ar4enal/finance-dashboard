@@ -100,29 +100,43 @@ def get_kline(market: str, code: str, period: str = "day", count: int = 120):
             return fail("基金K线数据为空")
     else:
         sym = ds.to_sina_symbol(mkt, code)
-        # 美股指数（纳斯达克/标普/道琼斯/费城半导体等）：用腾讯 usfqkline 接口（fqkline 对指数只有1天）
-        US_INDEX = {"ixic", "inx", "dji", "sox", "ndx", "rut", "vix"}
-        is_us_index = mkt == "US" and code.lower() in US_INDEX
-        if is_us_index:
+        if mkt == "US":
+            # 美股/海外指数修复（v22）：
+            # 腾讯 fqkline 对指数只返回 1 天（个股/ETF 才返回完整历史），
+            # 而 usfqkline 指数接口对指数返回完整历史、对个股只返回 1~2 行脏数据。
+            # 故策略：先走个股路径 usCODE.OQ，若拿到 >=2 根K线视为个股直接使用；
+            # 否则当作指数改用 usfqkline（usCODE）取完整历史。
+            # 这样无论内置还是用户自定义的美股/海外指数都显示历史，不再依赖写死白名单
+            #（原 US_INDEX 白名单只会让内置指数走对路径，自定义指数落入个股分支只显示当天）。
             try:
-                k = ds.tencent_us_index_kline("us" + code.upper(), period=period, count=count)
+                k = ds.tencent_kline("us" + code.upper() + ".OQ", period=period, count=count)
             except ds.DataSourceError:
                 k = {"dates": [], "ohlc": [], "volume": []}
-            # 费城半导体(sox)等腾讯无K线数据 → 返回不可用提示（不用虚拟数据）
-            if not k["dates"]:
-                return fail("该指数历史K线数据暂不可用")
+            if len(k["dates"]) < 2:
+                # 不是个股 → 按指数处理：改用指数专用接口取完整历史
+                try:
+                    k = ds.tencent_us_index_kline("us" + code.upper(), period=period, count=count)
+                except ds.DataSourceError:
+                    k = {"dates": [], "ohlc": [], "volume": []}
+                if not k["dates"]:
+                    return fail("该指数历史K线数据暂不可用")
         else:
-            tencent_sym = sym
-            if mkt == "US":
-                tencent_sym = "us" + code.upper() + ".OQ"
+            # 国内/港股/黄金/债券等：腾讯 fqkline 为主源；
+            # 但腾讯对部分代码（如北交所 bj899050、个别指数）可能只返回1天空壳或 WAF 拦截，
+            # 此时须回退到新浪拿完整历史。判定规则与美股分支对称：
+            #   腾讯拿到 >=2 根 → 直接用；否则回退新浪；新浪仍为空 → 诚实提示不可用。
             try:
-                k = ds.tencent_kline(tencent_sym, period=period, count=count)
+                k = ds.tencent_kline(sym, period=period, count=count)
             except ds.DataSourceError:
-                # 备用：新浪K线（仅A股/指数）
+                k = {"dates": [], "ohlc": [], "volume": []}
+            if len(k["dates"]) < 2:
                 try:
                     k = ds.sina_kline(sym, scale=240, datalen=count)
                 except ds.DataSourceError:
-                    return fail("K线获取失败")
+                    k = {"dates": [], "ohlc": [], "volume": []}
+                except Exception:
+                    # 新浪解析异常（空/null 等）也当无数据，避免 TypeError 冒泡
+                    k = {"dates": [], "ohlc": [], "volume": []}
             if not k["dates"]:
                 return fail("K线数据为空")
     # 计算指标
@@ -673,8 +687,14 @@ def _positions_data():
         pos = list(pos_by_key.values())
     for p in pos:
         if p.get("sold_out"):
-            # 已清仓：不拉行情，数量/成本/市值置空，保留累计收益（全部已实现盈亏）
-            p["name"] = p["code"]
+            # 已清仓：不拉行情价格（数量/成本/市值置空），但名称仍需展示真实产品名；
+            # 尝试从行情取名称（退市标的取不到则回退代码），与正常持仓的 name 行为一致。
+            try:
+                sym = ds.to_sina_symbol(ds.normalize_market(p["market"]), p["code"])
+                q = ds.sina_quotes([sym]).get(sym, {})
+                p["name"] = q.get("name") or p["code"]
+            except ds.DataSourceError:
+                p["name"] = p["code"]
             p["price"] = None
             p["market_value"] = None
             p["data_available"] = True
@@ -693,8 +713,10 @@ def _positions_data():
             p.update({"name": q.get("name", p["code"]), "price": price,
                       "market_value": round(mv, 2)})
         except ds.DataSourceError:
-            p["price"] = 0
-            p["market_value"] = round(p["cost"], 2)
+            # 行情不可用：市值/现价未知，保持 None（不回退成 cost，否则"按市值"排序
+            # 会与"按成本"混同、且会虚增组合总市值）；浮动盈亏无法计算置 0。
+            p["price"] = None
+            p["market_value"] = None
             holding_pnl = 0.0
             holding_pnl_pct = 0.0
             p["data_available"] = False
