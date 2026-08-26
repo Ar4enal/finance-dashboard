@@ -408,6 +408,16 @@ def indices_del(idx_id: int):
     return ok({"id": idx_id})
 
 
+@app.post("/api/indices/{idx_id}/move")
+def index_move(idx_id: int, dir: str = Query(..., description="up/down")):
+    """移动指数位置（与相邻行交换 sort_order）。
+    顶部/底部已无相邻行时 moved=False（前端对应按钮变灰）。"""
+    if dir not in ("up", "down"):
+        return fail("dir 必须为 up 或 down")
+    moved = db.swap_index_sort_order(idx_id, dir)
+    return ok({"id": idx_id, "dir": dir, "moved": moved})
+
+
 # =========================================================
 # A股板块资金流向（当天前十流入/流出）
 # =========================================================
@@ -639,6 +649,9 @@ def _positions_data():
         pos_by_key = {(_n(p["market"]), p["code"]): p for p in pos}
         for key, ov in po.items():
             mk, cd = key
+            # v21：实物黄金走 _gold_position 读 gold_holding，不在此应用 override（避免重复黄金行）
+            if mk == "GOLD":
+                continue
             if ov.get("quantity") is not None and ov["quantity"] <= 0:
                 # 数量为0 → 视为删除该持仓
                 pos_by_key.pop((mk, cd), None)
@@ -789,11 +802,22 @@ def save_position_override(market: str = Query(..., description="市场标识"),
                            code: str = Query(..., description="代码"),
                            quantity: float = Query(..., description="数量；传0表示删除该持仓"),
                            cost: Optional[float] = Query(None, description="总持仓成本；缺省按原成本")):
-    """保存某资产的手动持仓数量/成本。quantity<=0 时删除该持仓。"""
+    """保存某资产的手动持仓数量/成本。quantity<=0 时删除该持仓。
+    v21：兼容实物黄金（GOLD）——quantity 即克数、cost 即总成本（元），
+    转写成 gold_holding(grams, cost_per_gram) 写入 gold_holding 表（不写 position_override），
+    这样 _gold_position 仍从 gold_holding 读克数/成本价，UI 无重复行。
+    """
     mkt = ds.normalize_market(market)
     if quantity <= 0:
+        if mkt == "GOLD":
+            db.save_gold_holding(0, 0)
+            return ok({"market": mkt, "code": code, "deleted": True})
         db.delete_position_override(mkt, code)
         return ok({"market": mkt, "code": code, "deleted": True})
+    if mkt == "GOLD":
+        cp = round(cost / quantity, 4) if quantity > 0 and cost else 0
+        db.save_gold_holding(round(quantity, 4), cp)
+        return ok({"market": mkt, "code": code, "quantity": quantity, "cost": cp})
     db.save_position_override(mkt, code, quantity, cost if cost is not None else 0)
     return ok({"market": mkt, "code": code, "quantity": quantity, "cost": cost})
 
@@ -834,9 +858,16 @@ def _manual_add_one(mkt, code, amount, pnl):
         q = {}
     price = q.get("price")
     name = q.get("name", code)
+    price_source = "today"  # 标记价格来源（today / last_close）
 
     if not price or price <= 0:
-        return False, "无法获取「%s」当日价格" % (name or code)
+        # v21：当日无报价（节假日/收盘后/接口受限）→ 回退到最近一个交易日的收盘价
+        last, last_date = ds._last_close(mkt, code)
+        if last and last > 0:
+            price = last
+            price_source = "last_close"
+        else:
+            return False, "无法获取「%s」当日价格" % (name or code)
 
     # 数量 = 持有金额 / 当日价格；成本 = 持有金额 - 持有收益
     quantity = round(amount / price, 4)
@@ -855,6 +886,7 @@ def _manual_add_one(mkt, code, amount, pnl):
         "market": mkt, "code": code, "name": name,
         "price": price, "quantity": quantity, "cost": cost,
         "market_value": round(amount, 2), "pnl": round(pnl, 2),
+        "price_source": price_source,  # v21：today=当日价；last_close=回退到最近收盘价
     }
 
 

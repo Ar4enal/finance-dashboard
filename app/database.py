@@ -446,14 +446,17 @@ def get_gold_txns():
 
 def compute_gold_realized_pnl():
     """按流水顺序计算实物黄金已实现收益（卖出时 (卖价-均价)*克数 累加）。
-    与股票持仓的已实现收益口径一致。返回 float。"""
-    _, realized = _rebuild_gold_from_txns()
+    与股票持仓的已实现收益口径一致。返回 float。
+    v21 修复：改为「纯计算、不写库」——此前复用 _rebuild_gold_from_txns() 会
+    把 gold_holding 按流水重放覆盖（无流水时清零），导致用户手动设置/编辑的
+    克数与成本价在每次拉取持仓/金价时被重置为 0。"""
+    _, realized = _calc_gold_realized_pnl()
     return realized
 
 
-def _rebuild_gold_from_txns():
-    """重放全部黄金交易，重建 gold_holding（克数/成本价）并计算已实现收益。
-    返回 (holding dict, realized_pnl)。"""
+def _calc_gold_realized_pnl():
+    """纯计算：按流水顺序计算实物黄金持仓（克数/成本价）与已实现收益。
+    不写库。返回 (holding dict, realized_pnl float)。"""
     txns = get_gold_txns()
     qty = 0.0
     cost = 0.0
@@ -472,8 +475,16 @@ def _rebuild_gold_from_txns():
                 qty -= sell
     grams = round(qty, 4)
     cost_price = round(cost / qty, 4) if qty > 1e-9 else 0
-    holding = save_gold_holding(grams, cost_price)
-    return holding, round(realized, 2)
+    return {"grams": grams, "cost_price": cost_price}, round(realized, 2)
+
+
+def _rebuild_gold_from_txns():
+    """重放全部黄金交易，重建 gold_holding（克数/成本价）并计算已实现收益。
+    仅在黄金流水发生增/删时调用（add_gold_txn / delete_gold_txn）。
+    返回 (holding dict, realized_pnl)。"""
+    holding, realized = _calc_gold_realized_pnl()
+    holding = save_gold_holding(holding["grams"], holding["cost_price"])
+    return holding, realized
 
 
 # ---------------- 资产收益编辑覆盖 ----------------
@@ -636,6 +647,7 @@ DEFAULT_INDICES = [
     ("标普500", "US", "inx"),
     ("道琼斯", "US", "dji"),
     ("费城半导体", "US", "sox"),
+    ("纽约黄金期货", "GOLD", "hf_GC"),  # v21 新增：COMEX 黄金主力
 ]
 
 
@@ -683,6 +695,37 @@ def delete_custom_index(idx_id):
     try:
         conn.execute("DELETE FROM custom_indices WHERE id=?", (idx_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def swap_index_sort_order(idx_id, dir):
+    """与相邻行交换 sort_order。dir='up' 时和前一行交换，'down' 时和后一行交换。
+    顶部不能再上移、底部不能再下移（返回 False 表示未移动）。"""
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT id, sort_order FROM custom_indices WHERE id=?", (idx_id,)).fetchone()
+        if not row:
+            return False
+        cur_order = row["sort_order"]
+        if dir == "up":
+            nxt = conn.execute(
+                "SELECT id, sort_order FROM custom_indices WHERE sort_order<? ORDER BY sort_order DESC, id DESC LIMIT 1",
+                (cur_order,)).fetchone()
+        elif dir == "down":
+            nxt = conn.execute(
+                "SELECT id, sort_order FROM custom_indices WHERE sort_order>? ORDER BY sort_order ASC, id ASC LIMIT 1",
+                (cur_order,)).fetchone()
+        else:
+            return False
+        if not nxt:
+            return False
+        # 互换 sort_order（用 -1 中转避免 UNIQUE 约束冲突）
+        conn.execute("UPDATE custom_indices SET sort_order=-1 WHERE id=?", (row["id"],))
+        conn.execute("UPDATE custom_indices SET sort_order=? WHERE id=?", (cur_order, nxt["id"]))
+        conn.execute("UPDATE custom_indices SET sort_order=? WHERE id=?", (nxt["sort_order"], row["id"]))
+        conn.commit()
+        return True
     finally:
         conn.close()
 

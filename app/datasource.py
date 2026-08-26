@@ -730,6 +730,55 @@ def sina_news(keyword="", limit=30):
 
 
 # ---------------------------------------------------------------
+# 6. 最近一个交易日收盘价（v21 新增）—— sina_quotes 取不到价时回退
+#    主要用于 _manual_add_one（新增持仓 / 录入交易）在节假日/收盘后
+#    仍能取到一个参考价，避免「无法获取当日价格」错误。
+#    基金用 fund_kline（天天基金净值历史，最后一个单位净值）；
+#    美股指数用 tencent_us_index_kline；其他用 tencent_kline；
+#    腾讯接口偶发 501（间歇性故障）→ 自动重试 3 次；
+#    A 股/指数在腾讯失败后追加新浪 K 线兜底。
+#    返回 (close_price, date_str) 或 (None, None)。
+# ---------------------------------------------------------------
+def _last_close(market, code, count=5):
+    """取最近一个交易日的收盘价。返回 (close, date_str) 或 (None, None)。"""
+
+    def _try_kline(fn):
+        """带重试（腾讯偶发 501）的 K 线调用，成功返回 (close, date)，失败返回 (None, None)。"""
+        for attempt in range(3):
+            try:
+                k = fn()
+                if k and k["dates"] and k["ohlc"]:
+                    return k["ohlc"][-1][1], k["dates"][-1]
+            except DataSourceError:
+                pass
+            except Exception:
+                pass
+            if attempt < 2:
+                time.sleep(0.3 * (attempt + 1))
+        return None, None
+
+    try:
+        if market == "FUND":
+            return _try_kline(lambda: fund_kline(code, count=count))
+        if market == "US":
+            c = code.lower()
+            # 美股指数走专用接口
+            if c in ("ixic", "inx", "dji", "sox", "ndx", "rut", "vix"):
+                return _try_kline(lambda: tencent_us_index_kline("us" + c.upper(), count=count))
+            return _try_kline(lambda: tencent_kline("us" + c.upper() + ".OQ", count=count))
+        sym = to_sina_symbol(market, code)
+        r = _try_kline(lambda: tencent_kline(sym, count=count))
+        if r[0]:
+            return r
+        # A 股/指数：腾讯 501 时用新浪 K 线兜底
+        if market == "A":
+            return _try_kline(lambda: sina_kline(sym, scale=240, datalen=count))
+        return r
+    except Exception:
+        return None, None
+
+
+# ---------------------------------------------------------------
 # 统一入口：根据市场类型解析 symbol → 新浪 symbol
 # ---------------------------------------------------------------
 def to_sina_symbol(market, code):

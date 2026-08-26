@@ -249,12 +249,25 @@ export default function Quotes() {
     const code = idxForm.code.trim()
     if (!code) { alert('请输入指数代码'); return }
     try {
-      await api.addIndex(idxForm.name.trim() || code, idxForm.market, code)
+      // v21：传原始 trim 后的 name（可空串），由后端在 name 为空时自动从行情拉取名称；
+      // 之前用 `idxForm.name.trim() || code` 兜底导致后端永远收不到空串，自动识别失效。
+      await api.addIndex(idxForm.name.trim(), idxForm.market, code)
       setShowAddIndex(false)
       setIdxForm({ name: '', market: 'A', code: '' })
       fetchIndex()
     } catch (e) { alert(e.message) }
   }
+
+  // v21：移动指数位置（与相邻行交换 sort_order，顶部 ▲ / 底部 ▼ 自动 disable）
+  const moveIdx = async (idx, dir) => {
+    try {
+      const r = await api.moveIndex(idx.id, dir)
+      if (r && r.moved) fetchIndex()
+    } catch (e) { alert(e.message) }
+  }
+  // 顶部/底部判定（首/末位置禁用对应方向）
+  const isFirst = (idx) => indices.length > 0 && indices[0].id === idx.id
+  const isLast = (idx) => indices.length > 0 && indices[indices.length - 1].id === idx.id
 
   // 金额格式化（亿/万）
   const fmtMoney = (n) => {
@@ -314,9 +327,15 @@ export default function Quotes() {
           {indices.map(idx => {
             const q = indexQuotes[idx.code]
             const unavailable = q && q.available === false
+            const first = isFirst(idx)
+            const last = isLast(idx)
             return (
               <div key={idx.code + idx.market} className="index-card" onClick={() => openKline(idx.market, idx.code, idx.name)}>
                 <div className="ic-name">
+                  <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, marginRight: 6 }}>
+                    <span className={'idx-mv' + (first ? ' disabled' : '')} title={first ? '已是最顶部' : '上移'} onClick={(e) => { e.stopPropagation(); if (!first) moveIdx(idx, 'up') }}>▲</span>
+                    <span className={'idx-mv' + (last ? ' disabled' : '')} title={last ? '已是最底部' : '下移'} onClick={(e) => { e.stopPropagation(); if (!last) moveIdx(idx, 'down') }}>▼</span>
+                  </span>
                   {idx.name}
                   <span className="idx-del" title="删除该指数" onClick={(e) => { e.stopPropagation(); delIndex(idx) }}>✕</span>
                 </div>
@@ -438,7 +457,7 @@ export default function Quotes() {
                 {f.available === false
                   ? <td className="num muted" colSpan={2}>数据暂不可用</td>
                   : <>
-                      <td className="num" style={{ fontWeight: 600 }}>{fmt(f.price)}</td>
+                      <td className="num" style={{ fontWeight: 600 }}>{fmt(f.price, 4)}</td>
                       <td className={`num ${cls(f.pct)}`}>{sign(f.pct)}%</td>
                     </>}
                 <td className="op-col">
@@ -533,9 +552,9 @@ export default function Quotes() {
               <button className="modal-close" onClick={() => setFundDetail(null)}>×</button>
             </div>
             <div className="fund-info">
-              <div className="fi"><div className="l">最新净值</div><div className="v">{fmt(fundDetail.nav.nav)}</div></div>
+              <div className="fi"><div className="l">最新净值</div><div className="v">{fmt(fundDetail.nav.nav, 4)}</div></div>
               <div className="fi"><div className="l">日涨跌幅</div><div className={`v ${cls(fundDetail.nav.pct)}`}>{sign(fundDetail.nav.pct)}%</div></div>
-              <div className="fi"><div className="l">累计净值</div><div className="v">{fmt(fundDetail.nav.acc_nav)}</div></div>
+              <div className="fi"><div className="l">累计净值</div><div className="v">{fmt(fundDetail.nav.acc_nav, 4)}</div></div>
             </div>
             <div className="card-title" style={{ marginTop: 14 }}>📈 净值 K 线</div>
             <KlineChart market="FUND" code={fundDetail.nav.code} />

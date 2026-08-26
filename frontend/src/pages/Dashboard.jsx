@@ -8,6 +8,8 @@ const fmt = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('zh-CN',
 const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
+// v21：场外基金净值显示 4 位小数，其他市场 2 位
+const pfmt = (n, market) => (n == null ? '—' : fmt(n, market === 'FUND' ? 4 : 2))
 
 export default function Dashboard() {
   const [summary, setSummary] = useState(null)
@@ -93,7 +95,7 @@ export default function Dashboard() {
                         size="md" onSaved={load}
                       />}
                   <div className="pos-row"><span>数量</span><b>{p.sold_out ? '—' : fmt(p.quantity, p.is_physical_gold ? 2 : 0)}</b></div>
-                  <div className="pos-row"><span>现价 / 市值</span><b>{p.sold_out ? <span className="muted">— / —</span> : (p.data_available === false ? <span className="muted">— / —</span> : `${fmt(p.price)} / ${money(p.market_value)}`)}</b></div>
+                  <div className="pos-row"><span>现价 / 市值</span><b>{p.sold_out ? <span className="muted">— / —</span> : (p.data_available === false ? <span className="muted">— / —</span> : `${pfmt(p.price, p.market)} / ${money(p.market_value)}`)}</b></div>
                 </div>
               ))}
             </div>

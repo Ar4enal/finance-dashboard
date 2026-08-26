@@ -156,6 +156,10 @@ tr:hover td { background: rgba(88,166,255,.05); }
 .index-card .ic-name { font-size: 13px; color: var(--muted); margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
 .index-card .idx-del { color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 5px; border-radius: 4px; transition: all .15s; }
 .index-card .idx-del:hover { color: var(--down, #f85149); background: rgba(248,81,73,.12); }
+.index-card .idx-mv { color: var(--muted); cursor: pointer; font-size: 9px; line-height: 1; padding: 0 2px; user-select: none; }
+.index-card .idx-mv:hover { color: var(--accent); }
+.index-card .idx-mv.disabled { color: rgba(139,148,158,.3); cursor: not-allowed; }
+.index-card .idx-mv.disabled:hover { color: rgba(139,148,158,.3); }
 .index-card .ic-value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
 .index-card .ic-pct { font-size: 15px; font-weight: 600; }
 .index-card .ic-mark { font-size: 11px; color: var(--muted); margin-top: 4px; }

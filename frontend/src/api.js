@@ -22,10 +22,11 @@ export const api = {
   watchlist: () => request('/api/watchlist'),
   addWatch: (market, code, name) => request(`/api/watchlist?market=${market}&code=${code}${name ? '&name=' + encodeURIComponent(name) : ''}`, { method: 'POST' }),
   delWatch: (id) => request(`/api/watchlist/${id}`, { method: 'DELETE' }),
-  // 行情看板指数配置（自定义选择/新增/删除）
+  // 行情看板指数配置（自定义选择/新增/删除/移动）
   indices: () => request('/api/indices'),
   addIndex: (name, market, code) => request(`/api/indices?name=${encodeURIComponent(name)}&market=${market}&code=${encodeURIComponent(code)}`, { method: 'POST' }),
   delIndex: (id) => request(`/api/indices/${id}`, { method: 'DELETE' }),
+  moveIndex: (id, dir) => request(`/api/indices/${id}/move?dir=${dir}`, { method: 'POST' }),
   // A股板块资金流向（当天前十流入/流出）
   sectorFlow: () => request('/api/quotes/sector-flow'),
   // 持仓置顶

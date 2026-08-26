@@ -37,6 +37,8 @@ const fmt = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('zh-CN',
 const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
+// v21：场外基金净值显示 4 位小数，其他市场 2 位
+const pfmt = (n, market) => (n == null ? '—' : fmt(n, market === 'FUND' ? 4 : 2))
 
 export default function Positions() {
   const [positions, setPositions] = useState([])
@@ -249,18 +251,25 @@ export default function Positions() {
 
   // 排序后的持仓：默认按持仓收益降序；可切换按市值/成本；
   // 用户置顶的产品永远排在列表最前面（置顶数量不限）。
+  // v21 修复：
+  //   1) comparator 增加次级稳定键 (market, code)，避免主排序键坍缩（行情不可用时
+  //      market_value 回退为 cost、holdingPnl=0）导致三键结果一致、列表"看起来不变"。
+  //   2) 修复置顶排序方向（之前 b - a 写反，置顶的产品反而排到了最后）。
   const sortedPositions = (() => {
-    const desc = (fn) => (a, b) => (fn(b) || 0) - (fn(a) || 0)
     let list = [...positions]
-    if (posSort === 'cost') {
-      list.sort(desc(p => p.cost))
-    } else if (posSort === 'mv') {
-      list.sort(desc(p => p.market_value))
-    } else {
-      list.sort(desc(p => p.holdingPnl != null ? p.holdingPnl : p.pnl))  // 持仓收益
-    }
-    // 置顶优先（稳定排序，组内保持上面的收益/市值/成本序）
-    list.sort((a, b) => Number(!!pinnedSet[b.market + ':' + b.code]) - Number(!!pinnedSet[a.market + ':' + a.code]))
+    const keyOf = posSort === 'cost' ? p => p.cost
+      : posSort === 'mv' ? p => p.market_value
+      : p => (p.holdingPnl != null ? p.holdingPnl : p.pnl)  // 默认 pnl
+    list.sort((a, b) => {
+      const va = keyOf(a) || 0, vb = keyOf(b) || 0
+      if (vb !== va) return vb - va
+      // 次级稳定键：(market, code) 升序
+      const ka = (a.market || '') + ':' + (a.code || '')
+      const kb = (b.market || '') + ':' + (b.code || '')
+      return ka < kb ? -1 : ka > kb ? 1 : 0
+    })
+    // 置顶优先（a 置顶 → 返回 1，a 排前面）
+    list.sort((a, b) => Number(!!pinnedSet[a.market + ':' + a.code]) - Number(!!pinnedSet[b.market + ':' + b.code]))
     return list
   })()
 
@@ -446,7 +455,7 @@ export default function Positions() {
                 </>}
             <div className="pos-row"><span>数量</span><b>{p.sold_out ? '—' : fmt(p.quantity, p.is_physical_gold ? 2 : 0)}</b></div>
             <div className="pos-row"><span>持仓成本</span><b>{p.sold_out ? '—' : money(p.cost)}</b></div>
-            <div className="pos-row"><span>现价 / 市值</span><b>{p.sold_out ? <span className="muted">— / —</span> : (p.data_available === false ? <span className="muted">— / —</span> : `${fmt(p.price)} / ${money(p.market_value)}`)}</b></div>
+            <div className="pos-row"><span>现价 / 市值</span><b>{p.sold_out ? <span className="muted">— / —</span> : (p.data_available === false ? <span className="muted">— / —</span> : `${pfmt(p.price, p.market)} / ${money(p.market_value)}`)}</b></div>
             {p.sold_out && (
               <div className="pos-row"><span>累计收益</span><b className={cls(p.cumPnl)}>{sign(p.cumPnl)}</b></div>
             )}
@@ -459,9 +468,9 @@ export default function Positions() {
           持仓明细
           <span className="pc-sub" style={{ marginLeft: 10, fontSize: 12 }}>
             排序：
-            <button className="btn-ghost btn-sm" onClick={() => setPosSort('pnl')}>{posSort === 'pnl' ? '按持仓收益 ✓' : '按持仓收益'}</button>
-            <button className="btn-ghost btn-sm" onClick={() => setPosSort('mv')}>{posSort === 'mv' ? '按市值 ✓' : '按市值'}</button>
-            <button className="btn-ghost btn-sm" onClick={() => setPosSort('cost')}>{posSort === 'cost' ? '按持仓成本 ✓' : '按持仓成本'}</button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setPosSort('pnl')}>{posSort === 'pnl' ? '按持仓收益 ✓' : '按持仓收益'}</button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setPosSort('mv')}>{posSort === 'mv' ? '按市值 ✓' : '按市值'}</button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setPosSort('cost')}>{posSort === 'cost' ? '按持仓成本 ✓' : '按持仓成本'}</button>
           </span>
           <span className="pc-sub" style={{ marginLeft: 10, fontSize: 12 }}>📌 置顶的产品永远排在列表最前</span>
         </div>
@@ -479,7 +488,7 @@ export default function Positions() {
                 <td><span className="badge badge-a">{p.market}</span></td>
                 <td className="num">{p.sold_out ? '—' : fmt(p.quantity, p.is_physical_gold ? 2 : 0)}</td>
                 <td className="num">{p.sold_out ? '—' : money(p.cost)}</td>
-                <td className="num">{p.data_available === false ? <span className="muted">数据暂不可用</span> : (p.sold_out ? '—' : fmt(p.price))}</td>
+                <td className="num">{p.data_available === false ? <span className="muted">数据暂不可用</span> : (p.sold_out ? '—' : pfmt(p.price, p.market))}</td>
                 <td className="num">{p.data_available === false ? <span className="muted">—</span> : (p.sold_out ? '—' : money(p.market_value))}</td>
                 <td>
                   {p.data_available === false ? <span className="muted">数据暂不可用</span> : (
@@ -492,9 +501,10 @@ export default function Positions() {
                   )}
                 </td>
                 <td className="op-col">
-                  {p.is_physical_gold ? (
-                    <span className="pc-sub">实物黄金请用下方卡片编辑</span>
-                  ) : p.sold_out ? (
+                  {/* v21：实物黄金也支持在持仓明细中编辑（克数=quantity / 总成本=cost），
+                      复用 openEditPos → savePositionOverride → 后端 save_position_override 兼容 GOLD → save_gold_holding。
+                      售罄行仍屏蔽「编辑」按钮（无数量可编辑），保留「置顶」「删除」。 */}
+                  {p.sold_out ? (
                     <>
                       <button className="btn btn-sm" style={{ marginRight: 6 }} onClick={() => togglePin(p)} title={pinnedSet[p.market + ':' + p.code] ? '取消置顶' : '置顶该产品（数量不限），置顶后永远排在列表最前'}>
                         {pinnedSet[p.market + ':' + p.code] ? '📌 已置顶' : '置顶'}
@@ -585,7 +595,7 @@ export default function Positions() {
                   <div className="fund-confirm-hint" style={{ display: 'block', marginTop: 10 }}>
                     ✅ 已按当日价格计算：
                     <div style={{ marginTop: 6, fontSize: 13, color: 'var(--text)' }}>
-                      <b>{addPosResult.name}</b>（{addPosResult.code}）· 现价 ¥{fmt(addPosResult.price)}<br />
+                      <b>{addPosResult.name}</b>（{addPosResult.code}）· 现价 ¥{pfmt(addPosResult.price, addPosResult.market)}<br />
                       持仓数量 ≈ <b>{fmt(addPosResult.quantity, 4)}</b> · 持仓成本 <b>{money(addPosResult.cost)}</b><br />
                       市值 {money(addPosResult.market_value)} · 收益 <b className={cls(addPosResult.pnl)}>{sign(addPosResult.pnl)}</b>
                     </div>
@@ -678,16 +688,13 @@ export default function Positions() {
       {/* 实物黄金（置于页面最下方） */}
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-title">实物黄金（按人民币/克估值）</div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-end' }}>
-          <div><div className="form-label">持有克数</div>
-            <HistInput field="gold:grams" type="number" min="0" step="0.01" style={{ width: 120 }}
-              value={goldForm.grams} placeholder={gold?.grams || '0'}
-              onChange={v => setGoldForm({ ...goldForm, grams: v })} /></div>
-          <div><div className="form-label">成本价（元/克）</div>
-            <HistInput field="gold:cost" type="number" min="0" step="0.01" style={{ width: 120 }}
-              value={goldForm.cost_price} placeholder={gold?.cost_price || '0'}
-              onChange={v => setGoldForm({ ...goldForm, cost_price: v })} /></div>
-          <button className="btn" onClick={submitGold}>保存实物黄金</button>
+        {/* v21：删除「保存实物黄金」按钮 + 输入框，改为在「持仓明细」表里编辑克数/总成本
+            （行内点「编辑」→ 后端 save_position_override 兼容 GOLD → save_gold_holding）。
+            流水录入仍是增减克数的入口；此处只保留「清空」作为兜底重置。 */}
+        <div className="pc-sub" style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+          💡 实物黄金的克数与总成本，请在「持仓明细」表里点击 <b>编辑</b> 修改；下方可继续录入买卖流水。
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center' }}>
           {gold && gold.grams > 0 && <button className="btn-danger" onClick={deleteGold}>清空实物黄金</button>}
         </div>
         {gold && (
