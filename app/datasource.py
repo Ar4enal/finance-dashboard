@@ -6,6 +6,7 @@
 """
 import re
 import time
+from datetime import datetime, timedelta
 import requests
 
 # 公共请求头
@@ -103,6 +104,103 @@ def is_qdii_fund(fund_code):
     """判断基金代码是否为 QDII（非国内）基金。fund_code 支持 str/int。"""
     c = str(fund_code).strip()
     return c in QDII_FUND_CODES
+
+
+# =========================================================
+# 中国 A股 休市安排（用于基金确认份额日期跳过非交易日）
+# ---------------------------------------------------------
+# 数据来源：沪深北交易所（上交所/深交所/北交所）每年发布的
+# 《关于XXXX年部分节假日休市安排的通知》官方公告。
+# 2026 年数据取自官方公告（经东方财富转发，权威真实）：
+#   https://stock.eastmoney.com/a/202512223598373130.html
+#   https://finance.eastmoney.com/a/202512223598652817.html
+# 说明：
+#   - 该数据属公开、固定的官方规则（非行情类虚构数据），以真实来源为准。
+#   - 仅收录已公布的年份；未覆盖年份（历史/未来）无法保证真实，调用方须提示用户。
+#   - 调休上班日（周末补班）已并入对应节假日的休市区间，故此处只维护连续的休市日集合。
+# =========================================================
+HOLIDAY_SOURCE_NOTE = "沪深北交易所2026年休市安排官方公告"
+# 每个年份 -> 该年全部休市日期（含周末与法定节假日）集合，格式 "YYYY-MM-DD"
+CN_A_SHARE_HOLIDAYS = {
+    2026: set([
+        # 元旦：1/1(四)-1/3(六)休市，1/4(日)周末；1/5(一)开市
+        "2026-01-01", "2026-01-02", "2026-01-03",
+        # 春节：2/14(六)周末、2/15(日)-2/23(一)休市、2/28(六)周末；2/24(二)开市
+        "2026-02-14", "2026-02-15", "2026-02-16", "2026-02-17", "2026-02-18",
+        "2026-02-19", "2026-02-20", "2026-02-21", "2026-02-22", "2026-02-23", "2026-02-28",
+        # 清明节：4/4(六)-4/6(一)休市；4/7(二)开市
+        "2026-04-04", "2026-04-05", "2026-04-06",
+        # 劳动节：5/1(五)-5/5(二)休市、5/9(六)周末；5/6(三)开市
+        "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04", "2026-05-05", "2026-05-09",
+        # 端午节：6/19(五)-6/21(日)休市；6/22(一)开市
+        "2026-06-19", "2026-06-20", "2026-06-21",
+        # 中秋节：9/25(五)-9/27(日)休市、9/20(日)周末；9/28(一)开市
+        "2026-09-20", "2026-09-25", "2026-09-26", "2026-09-27",
+        # 国庆节：10/1(四)-10/7(三)休市、10/10(六)周末；10/8(四)开市
+        "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05",
+        "2026-10-06", "2026-10-07", "2026-10-10",
+    ]),
+}
+
+# 周末常量（getWeekday: 5=周六, 6=周日）
+_WEEKEND = (5, 6)
+
+
+def _parse_date(date_str):
+    """将 'YYYY-MM-DD' 解析为 datetime.date，非法返回 None。"""
+    try:
+        y, m, d = str(date_str).strip().split("-")
+        return datetime(int(y), int(m), int(d)).date()
+    except Exception:
+        return None
+
+
+def is_cn_trading_day(date_str):
+    """判断给定日期是否为中国 A股 交易日（非周末且非官方休市日）。
+
+    返回 (is_trading_day, covered)：
+      is_trading_day: True/False
+      covered: 该年份休市数据是否已覆盖（False 表示年份不在 CN_A_SHARE_HOLIDAYS，
+               仅按周末判断，需前端提示休市安排待更新）
+    """
+    dt = _parse_date(date_str)
+    if dt is None:
+        return False, False
+    holidays = CN_A_SHARE_HOLIDAYS.get(dt.year)
+    covered = holidays is not None
+    is_weekend = dt.weekday() in _WEEKEND
+    if is_weekend:
+        return False, covered
+    if holidays is not None:
+        return dt.strftime("%Y-%m-%d") not in holidays, True
+    # 年份未覆盖：只能保证跳过周末，法定节假日未知
+    return True, False
+
+
+def next_cn_trading_day(date_str, offset):
+    """从 date_str（含）起，向后数第 offset 个交易日（跳过周末与官方休市日）。
+
+    返回 (result_date_str, covered)：
+      result_date_str: 'YYYY-MM-DD'
+      covered: 计算区间内是否全程覆盖官方休市数据
+    仅使用 date 对象运算，避免任何时区漂移。
+    """
+    dt = _parse_date(date_str)
+    if dt is None:
+        return date_str, False
+    offset = max(0, int(offset))
+    covered = True
+    added = 0
+    cur = dt
+    # 若起始日当天就是非交易日，不影响计数（T 计入交易日判断）；从次日开始累加
+    while added < offset:
+        cur = cur + timedelta(days=1)
+        is_td, c = is_cn_trading_day(cur.strftime("%Y-%m-%d"))
+        if not c:
+            covered = False
+        if is_td:
+            added += 1
+    return cur.strftime("%Y-%m-%d"), covered
 
 
 class DataSourceError(Exception):
@@ -226,30 +324,25 @@ def _float(v):
 
 
 # 实时国内黄金现价（元/克），用于实物黄金估值。
-# 使用新浪沪金主力连续 nf_AU0（上期所黄金期货，报价单位为 元/克）。
-GOLD_CN_SYMBOL = "nf_AU0"
+# v23：优先使用上海黄金交易所 Au99.99 现货（沪金 au9999，hf_AU9999）；
+# 取不到时回退上期所黄金期货主力连续（nf_AU0）。两者均不可用时 available=False。
+GOLD_CN_SYMBOL_AU9999 = "hf_AU9999"
+GOLD_CN_SYMBOL_LEGACY = "nf_AU0"
 
 
-def gold_cn_price():
-    """
-    获取实时国内黄金价格（元/克）。返回 dict:
-      {"price": float(元/克), "name": str, "pct": float,
-       "asof": "YYYY-MM-DD HH:MM" 最后价格时间, "available": bool}
-    获取失败时 available=False（绝不返回虚拟价格）。
-    说明：nf_AU0 为上期所黄金期货，日盘 9:00-15:00、夜盘 21:00-次日2:30，
-    非交易时段价格保持最近收盘价不变（这是正常的，非 bug）。
-    """
+def _gold_price_for_symbol(symbol):
+    """取单个黄金品种实时价（元/克）。返回 {price,name,pct,prev,asof,available}。"""
     try:
-        quotes = sina_quotes([GOLD_CN_SYMBOL])
+        quotes = sina_quotes([symbol])
     except DataSourceError:
-        return {"price": 0.0, "name": "沪金连续", "pct": 0.0, "available": False}
-    q = quotes.get(GOLD_CN_SYMBOL)
+        return {"price": 0.0, "name": symbol, "pct": 0.0, "prev": 0.0, "asof": "", "available": False}
+    q = quotes.get(symbol)
     if not q or not q.get("price"):
-        return {"price": 0.0, "name": "沪金连续", "pct": 0.0, "available": False}
+        return {"price": 0.0, "name": symbol, "pct": 0.0, "prev": 0.0, "asof": "", "available": False}
     # 解析最后价格时间（f[1]=时间如150000, f[17]=日期如2026-08-24）
     asof = ""
     try:
-        text = _get("https://hq.sinajs.cn/list=%s" % GOLD_CN_SYMBOL,
+        text = _get("https://hq.sinajs.cn/list=%s" % symbol,
                     headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
                     decode="gbk")
         m = re.search(r'="(.*?)"', text)
@@ -265,12 +358,38 @@ def gold_cn_price():
         pass
     return {
         "price": round(q["price"], 2),
-        "name": q.get("name", "沪金连续"),
+        "name": q.get("name", symbol),
         "pct": q.get("pct", 0.0),
         "prev": q.get("prev", 0.0),
         "asof": asof,
         "available": True,
     }
+
+
+def gold_cn_price():
+    """
+    获取实时国内黄金价格（元/克）。返回 dict:
+      {"price": float(元/克), "name": str, "pct": float,
+       "asof": "YYYY-MM-DD HH:MM" 最后价格时间, "available": bool}
+    v23：先判断是否可以获取到沪金 au9999（SGE Au99.99 现货）数据；
+    可以则国内金价使用 au9999 价格，否则回退沪金连续（nf_AU0）。
+    两者均失败返回 available=False（绝不返回虚拟价格）。
+    """
+    # 先判断 au9999 是否可取到
+    au = _gold_price_for_symbol(GOLD_CN_SYMBOL_AU9999)
+    if au["available"]:
+        return au
+    # au9999 不可用 → 回退沪金连续（上期所黄金期货）
+    return _gold_price_for_symbol(GOLD_CN_SYMBOL_LEGACY)
+
+
+def gold_kline_symbol():
+    """
+    实物黄金 / 期货黄金 K 线所用 symbol：au9999 优先，取不到回退沪金连续。
+    （纽约金 hf_GC / 伦敦金 hf_XAU 等期货指数用各自 code，不走此函数）
+    """
+    au = _gold_price_for_symbol(GOLD_CN_SYMBOL_AU9999)
+    return GOLD_CN_SYMBOL_AU9999 if au["available"] else GOLD_CN_SYMBOL_LEGACY
 
 
 # ---------------------------------------------------------------
@@ -292,12 +411,20 @@ def tencent_kline(symbol, period="day", count=120):
     node = data.get("data", {}).get(symbol, {})
     # 优先取 qfqday（前复权），否则 day
     rows = node.get("qfqday") or node.get("day") or []
+    if not isinstance(rows, list):
+        raise DataSourceError("K线数据格式异常")
     dates, ohlc, volume = [], [], []
     for row in rows:
-        # row: [date, open, close, high, low, volume, ...]
-        dates.append(row[0])
-        ohlc.append([float(row[1]), float(row[2]), float(row[3]), float(row[4])])
-        volume.append(float(row[5]) if len(row) > 5 else 0)
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        try:
+            dates.append(row[0])
+            ohlc.append([float(row[1]), float(row[2]), float(row[3]), float(row[4])])
+            volume.append(float(row[5]))
+        except (ValueError, TypeError):
+            continue
+    if not dates:
+        raise DataSourceError("K线数据为空")
     return {"dates": dates, "ohlc": ohlc, "volume": volume}
 
 
@@ -318,11 +445,20 @@ def tencent_us_index_kline(symbol, period="day", count=120):
         raise DataSourceError("美股指数K线JSON解析失败")
     node = data.get("data", {}).get(symbol, {})
     rows = node.get("qfqday") or node.get("day") or []
+    if not isinstance(rows, list):
+        raise DataSourceError("美股指数K线数据格式异常")
     dates, ohlc, volume = [], [], []
     for row in rows:
-        dates.append(row[0])
-        ohlc.append([float(row[1]), float(row[2]), float(row[3]), float(row[4])])
-        volume.append(float(row[5]) if len(row) > 5 else 0)
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        try:
+            dates.append(row[0])
+            ohlc.append([float(row[1]), float(row[2]), float(row[3]), float(row[4])])
+            volume.append(float(row[5]))
+        except (ValueError, TypeError):
+            continue
+    if not dates:
+        raise DataSourceError("美股指数K线数据为空")
     return {"dates": dates, "ohlc": ohlc, "volume": volume}
 
 
@@ -339,11 +475,20 @@ def sina_kline(symbol, scale=240, datalen=120):
         data = json.loads(text)
     except Exception:
         raise DataSourceError("新浪K线解析失败")
+    if not isinstance(data, list):
+        raise DataSourceError("新浪K线解析失败")
     dates, ohlc, volume = [], [], []
     for row in data:
-        dates.append(row["day"])
-        ohlc.append([float(row["open"]), float(row["close"]), float(row["low"]), float(row["high"])])
-        volume.append(float(row["volume"]))
+        if not isinstance(row, dict) or "day" not in row:
+            continue
+        try:
+            dates.append(row["day"])
+            ohlc.append([float(row["open"]), float(row["close"]), float(row["low"]), float(row["high"])])
+            volume.append(float(row.get("volume", 0)))
+        except (ValueError, TypeError):
+            continue
+    if not dates:
+        raise DataSourceError("新浪K线数据为空")
     return {"dates": dates, "ohlc": ohlc, "volume": volume}
 
 

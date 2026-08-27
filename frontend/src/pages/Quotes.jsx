@@ -41,6 +41,16 @@ const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
 
+// v23：自选基金/标的按日涨跌幅排序（可调升/降），行情不可用（pct 缺失）的沉底（按 -Infinity 处理）
+const sortByPct = (arr, dir = 'desc') => (arr || []).slice().sort((a, b) => {
+  const pa = a && a.pct != null ? Number(a.pct) : Number.NEGATIVE_INFINITY
+  const pb = b && b.pct != null ? Number(b.pct) : Number.NEGATIVE_INFINITY
+  return dir === 'asc' ? pa - pb : pb - pa
+})
+
+// v23：行情看板暂不展示单独的「场内基金穿透」模块（保留代码，恢复时置 true）
+const SHOW_PENETRATION = false
+
 // 指数配置已改为后端持久化（custom_indices 表，首次启动自动填充内置预置）：
 //   国内：上证指数/深证成指/创业板指/科创50/沪深300
 //   国外：纳斯达克/标普500/道琼斯/费城半导体
@@ -63,6 +73,8 @@ export default function Quotes() {
   const [penLoading, setPenLoading] = useState(false)
   const [penetrations, setPenetrations] = useState([])  // 持仓基金穿透概览
   const [watchlist, setWatchlist] = useState([])
+  const [fundDir, setFundDir] = useState('desc')   // 自选基金：日涨跌幅排序方向（desc 降序 / asc 升序）
+  const [watchDir, setWatchDir] = useState('desc') // 自选标的：涨跌幅排序方向
   const { openKline } = useKline()
   const [search, setSearch] = useState('')
   const [gold, setGold] = useState(null)
@@ -139,6 +151,7 @@ export default function Quotes() {
           const q = qs.find(x => x.code === w.code)
           return { ...w, ...(q || {}) }
         })
+        // 存未排序的 enrichment 数据，排序在渲染时按 fundDir/watchDir 方向进行（点击表头即时切换，无需重新请求）
         setFunds(enrichedFunds)
         setWatchlist(enrichedWatch)
       } else {
@@ -258,6 +271,14 @@ export default function Quotes() {
     } catch (e) { alert(e.message) }
   }
 
+  // v23：期货指数快捷添加（纽约金 / 沪金 / 伦敦金）
+  const addFuturesIndex = async (name, code) => {
+    try {
+      await api.addIndex(name, 'GOLD', code)
+      fetchIndex()
+    } catch (e) { alert(e.message) }
+  }
+
   // v21：移动指数位置（与相邻行交换 sort_order，顶部 ▲ / 底部 ▼ 自动 disable）
   const moveIdx = async (idx, dir) => {
     try {
@@ -278,6 +299,10 @@ export default function Quotes() {
     return fmt(n, 0)
   }
 
+  // 渲染时按方向排序（点击表头切换 fundDir / watchDir）
+  const sortedFunds = sortByPct(funds, fundDir)
+  const sortedWatch = sortByPct(watchlist, watchDir)
+
   return (
     <section className="page active">
       <div className="page-head">
@@ -297,11 +322,14 @@ export default function Quotes() {
         <b style={{ marginLeft: 10, fontSize: 16 }}>
           {gold ? (gold.price_available ? '¥' + fmt(gold.price) + ' /克' : '数据暂不可用') : '加载中…'}
         </b>
+        {gold && gold.price_available && gold.price_name && (
+          <span style={{ color: 'var(--muted)', marginLeft: 6, fontSize: 12 }}>{gold.price_name}</span>
+        )}
         {gold && gold.price_available && (
           <span style={{ color: cls(gold.price_pct), marginLeft: 10 }}>{sign(gold.price_pct)}%</span>
         )}
         {gold && gold.price_available && gold.price_asof && (
-          <span style={{ color: 'var(--muted)', marginLeft: 10, fontSize: 12 }} title="沪金主力连续(上期所黄金期货)最后成交时间；日盘 9:00-15:00、夜盘 21:00-次日2:30，非交易时段价格不变">
+          <span style={{ color: 'var(--muted)', marginLeft: 10, fontSize: 12 }} title="国内金价来源：沪金 Au99.99（上海黄金交易所现货），取不到时回退沪金连续（上期所黄金期货）。非交易时段显示最近成交价">
             更新 {gold.price_asof}
           </span>
         )}
@@ -403,7 +431,8 @@ export default function Quotes() {
         )}
       </div>
 
-      {/* 场内基金穿透（持仓基金实时估值）——位于指数与自选基金模块中间 */}
+      {/* v23：场内基金穿透模块暂不展示（保留代码，后续恢复将 SHOW_PENETRATION 置 true） */}
+      {SHOW_PENETRATION && (
       <div className="fund-block">
         <div className="index-head">
           <span className="index-title">🔍 场内基金穿透</span>
@@ -437,6 +466,7 @@ export default function Quotes() {
               </div>
             ))}
       </div>
+      )}
 
       {/* 自选基金 */}
       <div className="fund-block">
@@ -445,9 +475,9 @@ export default function Quotes() {
           <span style={{ color: 'var(--muted)', fontSize: 12 }}>点击查看详情</span>
         </div>
         <table className="fund-table">
-          <thead><tr><th>名称</th><th>产品代码</th><th className="num">最新净值</th><th className="num">日涨跌幅</th><th>操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>产品代码</th><th className="num">最新净值</th><th className="num sortable" onClick={() => setFundDir(d => d === 'asc' ? 'desc' : 'asc')} title="点击切换升序 / 降序">日涨跌幅 <span className="sort-arr">{fundDir === 'asc' ? '↑' : '↓'}</span></th><th>操作</th></tr></thead>
           <tbody>
-            {funds.map(f => (
+            {sortedFunds.map(f => (
               <tr key={f.code} style={f.available === false ? { cursor: 'default' } : {}}>
                 <td className="f-name fund-name-link" onClick={() => f.available !== false && openFund(f.code)}>
                   {f.name || f.code}
@@ -481,9 +511,9 @@ export default function Quotes() {
       <div className="card">
         <div className="card-title">自选标的</div>
         <table>
-          <thead><tr><th>名称</th><th>市场</th><th className="num">最新价</th><th className="num">涨跌额</th><th className="num">涨跌幅</th><th>操作</th></tr></thead>
+          <thead><tr><th>名称</th><th>市场</th><th className="num">最新价</th><th className="num">涨跌额</th><th className="num sortable" onClick={() => setWatchDir(d => d === 'asc' ? 'desc' : 'asc')} title="点击切换升序 / 降序">涨跌幅 <span className="sort-arr">{watchDir === 'asc' ? '↑' : '↓'}</span></th><th>操作</th></tr></thead>
           <tbody>
-            {watchlist.map(q => (
+            {sortedWatch.map(q => (
               <tr key={q.id}>
                 <td>{q.name || q.code}</td>
                 <td><span className="badge badge-a">{q.market}</span></td>
@@ -510,17 +540,25 @@ export default function Quotes() {
               <button className="modal-close" onClick={() => setShowAddIndex(false)}>×</button>
             </div>
             <div className="pc-sub" style={{ marginBottom: 10, fontSize: 12, color: 'var(--muted)' }}>
-              输入指数代码与名称（名称可留空自动识别）。A股指数如 <code>sh000001</code>（上证）、<code>sz399006</code>（创业板）、<code>sh000300</code>（沪深300）；国外指数如 <code>ixic</code>（纳斯达克）、<code>inx</code>（标普500）、<code>dji</code>（道琼斯）、<code>sox</code>（费城半导体）。
+              输入指数代码与名称（名称可留空自动识别）。A股指数如 <code>sh000001</code>（上证）、<code>sz399006</code>（创业板）、<code>sh000300</code>（沪深300）；国外指数如 <code>ixic</code>（纳斯达克）、<code>inx</code>（标普500）、<code>dji</code>（道琼斯）、<code>sox</code>（费城半导体）；期货指数（纽约金/沪金/伦敦金）可直接点下方快捷按钮添加。
             </div>
             <div className="form-row">
               <div><div className="form-label">市场</div>
                 <select className="form-input" value={idxForm.market} onChange={e => setIdxForm({ ...idxForm, market: e.target.value })}>
-                  <option value="A">A股</option><option value="US">美股</option>
+                  <option value="A">A股</option><option value="US">美股</option><option value="GOLD">期货指数</option>
                 </select></div>
               <div><div className="form-label">指数代码</div><HistInput field="idx:code" value={idxForm.code} onChange={v => setIdxForm({ ...idxForm, code: v })} placeholder="sh000001 / ixic" /></div>
             </div>
             <div className="form-row" style={{ marginTop: 10 }}>
               <div style={{ flex: 1 }}><div className="form-label">指数名称（可留空）</div><HistInput field="idx:name" value={idxForm.name} onChange={v => setIdxForm({ ...idxForm, name: v })} placeholder="留空则自动识别" /></div>
+            </div>
+            <div className="form-row" style={{ marginTop: 8 }}>
+              <div style={{ flex: 1, fontSize: 12, color: 'var(--muted)' }}>期货指数快捷添加：
+                <button className="btn-ghost btn-sm" style={{ marginLeft: 6 }} onClick={() => addFuturesIndex('纽约金', 'hf_GC')}>纽约金</button>
+                <button className="btn-ghost btn-sm" onClick={() => addFuturesIndex('沪金', 'nf_AU0')}>沪金</button>
+                <button className="btn-ghost btn-sm" onClick={() => addFuturesIndex('伦敦金', 'hf_XAU')}>伦敦金</button>
+                <span style={{ marginLeft: 8 }}>（纽约金=COMEX黄金 hf_GC / 沪金=上期所黄金连续 nf_AU0 / 伦敦金=现货黄金 hf_XAU）</span>
+              </div>
             </div>
             <div className="form-actions">
               <button className="btn-ghost" onClick={() => setShowAddIndex(false)}>取消</button>

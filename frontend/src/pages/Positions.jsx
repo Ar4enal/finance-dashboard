@@ -62,7 +62,16 @@ export default function Positions() {
   const [editPos, setEditPos] = useState(null)  // 正在编辑的持仓
   const [posForm, setPosForm] = useState({ quantity: '', cost: '' })
   // 持仓排序：'pnl'（按持仓收益，默认）| 'mv'（按市值）| 'cost'（按成本）
-  const [posSort, setPosSort] = useState('pnl')
+  // 持久化到 localStorage：切换界面再回来仍保留上次选择的排序方式（v23 修复）
+  const POS_SORT_KEY = 'fw_pos_sort'
+  const [posSort, setPosSort] = useState(() => {
+    try { const v = localStorage.getItem(POS_SORT_KEY); if (['pnl', 'mv', 'cost'].includes(v)) return v } catch (e) {}
+    return 'pnl'
+  })
+  const changePosSort = (s) => {
+    setPosSort(s)
+    try { localStorage.setItem(POS_SORT_KEY, s) } catch (e) {}
+  }
   // 持仓置顶（后端持久化，置顶数量不限）
   const [pins, setPins] = useState([])
   // 持仓明细分页（每页 20 条）
@@ -298,25 +307,25 @@ export default function Positions() {
   const curGoldPage = Math.min(goldPage, goldTotalPages)
   const pageGoldTxns = goldTxns.slice((curGoldPage - 1) * GOLD_PAGE_SIZE, curGoldPage * GOLD_PAGE_SIZE)
 
-  // 计算基金份额确认日期（跳过周末，不含法定节假日）
-  // 规则：境内普通基金 15:00前→T+1、15:00后→T+2；
-  //       QDII（非国内）基金无论何时提交，确认份额均为 T+2。
-  const nextTradingDay = (dateStr, offsetDays) => {
-    const d = new Date(dateStr + 'T00:00:00')
-    let added = 0
-    while (added < offsetDays) {
-      d.setDate(d.getDate() + 1)
-      const day = d.getDay()
-      if (day !== 0 && day !== 6) added++  // 跳过周六(0)周日(6)
-    }
-    return d.toISOString().split('T')[0]
-  }
-  // 基金确认：QDII 恒为 T+2；境内基金按 15:00 前后分 T+1 / T+2
+  // 计算基金份额确认日期：调用后端 /api/fund/confirm-date
+  // 后端基于真实休市安排（沪深北交易所官方公告）跳过周末与法定节假日；
+  // QDII 恒为 T+2，境内基金按 15:00 前后分 T+1 / T+2。
+  const [fundConfirm, setFundConfirm] = useState({ confirm_date: '—', rule: '', available: true, holiday_note: '' })
+  const fundConfirmDate = fundConfirm.confirm_date
+  // 基金确认规则文案（本地同步用于备注/显示，供用户即时参考；最终日期以后端为准）
   const fundTPlus = isQdii ? 2 : (form.fund_time === 'after' ? 2 : 1)
-  const fundConfirmDate = nextTradingDay(form.trans_date, fundTPlus)
   const fundRuleText = isQdii ? 'QDII基金' : (form.fund_time === 'after' ? '15:00后' : '15:00前')
   const isFundTxn = form.market === '基金'
   const showFundTime = isFundTxn
+  // 基金交易日期 / QDII / 15:00 前后变化时，拉取真实确认份额日期
+  useEffect(() => {
+    if (!isFundTxn || !form.trans_date) { setFundConfirm({ confirm_date: '—', rule: '', available: true, holiday_note: '' }); return }
+    let alive = true
+    api.fundConfirmDate(form.trans_date, isQdii, form.fund_time)
+      .then(r => { if (alive) setFundConfirm({ confirm_date: r.confirm_date, rule: r.rule, available: !!r.available, holiday_note: r.holiday_source_note || '' }) })
+      .catch(() => { if (alive) setFundConfirm({ confirm_date: '—', rule: '', available: false, holiday_note: '确认份额日期获取失败，请手动核对' }) })
+    return () => { alive = false }
+  }, [isFundTxn, form.trans_date, isQdii, form.fund_time])
 
   // 录入/编辑基金时，自动判断该代码是否为 QDII（非国内）基金（内置清单）
   const checkQdii = async (code) => {
@@ -387,6 +396,9 @@ export default function Positions() {
     const marketMapRev = { A: 'A股', US: '美股', HK: '港股', GOLD: '黄金', FUND: '基金', BOND: '债券' }
     setEditTxn(t)
     setQdiiAuto(false); setQdiiManual(false)
+    // 从交易备注里还原 15:00 前后标记（录入时写入了「15:00前/15:00后/QDII基金」标签）
+    const note = t.note || ''
+    const fundTime = /15:00后/.test(note) ? 'after' : 'before'
     setForm({
       market: marketMapRev[t.market] || 'A股',
       code: t.code,
@@ -395,7 +407,8 @@ export default function Positions() {
       price: String(t.price),
       fee: t.fee || 0,
       trans_date: t.trans_date,
-      note: t.note || '',
+      note,
+      fund_time: fundTime,
     })
   }
 
@@ -472,9 +485,9 @@ export default function Positions() {
           持仓明细
           <span className="pc-sub" style={{ marginLeft: 10, fontSize: 12 }}>
             排序：
-            <button type="button" className="btn-ghost btn-sm" onClick={() => setPosSort('pnl')}>{posSort === 'pnl' ? '按持仓收益 ✓' : '按持仓收益'}</button>
-            <button type="button" className="btn-ghost btn-sm" onClick={() => setPosSort('mv')}>{posSort === 'mv' ? '按市值 ✓' : '按市值'}</button>
-            <button type="button" className="btn-ghost btn-sm" onClick={() => setPosSort('cost')}>{posSort === 'cost' ? '按持仓成本 ✓' : '按持仓成本'}</button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => changePosSort('pnl')}>{posSort === 'pnl' ? '按持仓收益 ✓' : '按持仓收益'}</button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => changePosSort('mv')}>{posSort === 'mv' ? '按市值 ✓' : '按市值'}</button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => changePosSort('cost')}>{posSort === 'cost' ? '按持仓成本 ✓' : '按持仓成本'}</button>
           </span>
           <span className="pc-sub" style={{ marginLeft: 10, fontSize: 12 }}>📌 置顶的产品永远排在列表最前</span>
         </div>
@@ -824,13 +837,11 @@ export default function Positions() {
             <div className="form-row"><div><div className="form-label">备注</div><input className="form-input" value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} /></div></div>
             {showFundTime && (
               <div className="form-row" style={{ marginTop: 8 }}>
-                {!isQdii && (
-                  <div><div className="form-label">交易时间</div>
-                    <select className="form-input" value={form.fund_time} onChange={e => setForm({ ...form, fund_time: e.target.value })}>
-                      <option value="before">15:00 之前</option>
-                      <option value="after">15:00 之后</option>
-                    </select></div>
-                )}
+                <div><div className="form-label">交易时间{isQdii ? '（QDII 仅作记录）' : ''}</div>
+                  <select className="form-input" value={form.fund_time} onChange={e => setForm({ ...form, fund_time: e.target.value })}>
+                    <option value="before">15:00 之前</option>
+                    <option value="after">15:00 之后</option>
+                  </select></div>
                 <div style={{ alignSelf: 'flex-end', paddingBottom: 8 }}>
                   {/* 非国内基金（QDII）手动标记：兜底内置清单未收录的代码 */}
                   <label className="qdii-toggle" style={{ display: 'block', marginBottom: 6, cursor: 'pointer', fontSize: 13, color: 'var(--muted)' }}>
@@ -843,16 +854,15 @@ export default function Positions() {
                     非国内基金（QDII，确认份额固定 T+2）
                     {qdiiAuto && <span style={{ color: 'var(--accent)', fontSize: 12, marginLeft: 4 }}>（已自动识别）</span>}
                   </label>
-                  {isQdii
-                    ? <span className="fund-confirm-hint" title="QDII（非国内）基金确认份额为 T+2，不受 15:00 前后影响；通常还需 T+2~T+3 才能卖出/到账。">
-                        🌍 <b style={{ color: 'var(--accent)' }}>QDII 非国内基金</b>
-                        <span style={{ marginLeft: 6, color: 'var(--muted)', fontSize: 12 }}>确认份额固定 T+2</span>
-                        <br />📅 确认份额日期：<b style={{ color: 'var(--accent)' }}>{form.trans_date ? fundConfirmDate : '—'}</b>
-                      </span>
-                    : <span className="fund-confirm-hint" title="场外基金确认份额：15:00 前按当日净值，T+1 日确认份额；15:00 后按下一交易日净值，T+2 日确认份额（跳过周末，不含法定节假日）。若为非国内基金（QDII），请勾选上方选项。">
-                        📅 确认份额日期：<b style={{ color: 'var(--accent)' }}>{form.trans_date ? fundConfirmDate : '—'}</b>
-                        <span style={{ marginLeft: 6, color: 'var(--muted)', fontSize: 12 }}>（{fundRuleText}，T+{fundTPlus}，跳过周末）</span>
-                      </span>}
+                  <span className="fund-confirm-hint" title="确认份额日期基于沪深北交易所官方休市安排计算，跳过周末与法定节假日。境内基金 15:00 前 T+1、15:00 后 T+2；QDII 恒 T+2（15:00 前后仅作记录，不影响 T+2）。">
+                    📅 确认份额日期：<b style={{ color: 'var(--accent)' }}>{form.trans_date ? fundConfirmDate : '—'}</b>
+                    <span style={{ marginLeft: 6, color: 'var(--muted)', fontSize: 12 }}>
+                      （{fundRuleText}，T+{fundTPlus}
+                      {fundConfirm.available ? '，跳过非交易日' : '，⚠️ 休市安排待更新仅跳周末'}）
+                    </span>
+                    {!fundConfirm.available && fundConfirm.holiday_note &&
+                      <div style={{ color: '#e8a33d', fontSize: 12, marginTop: 3 }}>⚠️ {fundConfirm.holiday_note}</div>}
+                  </span>
                 </div>
               </div>
             )}
@@ -889,6 +899,11 @@ export default function Positions() {
             <div className="form-row"><div><div className="form-label">备注</div><input className="form-input" value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} /></div></div>
             {editTxn && editTxn.market === 'FUND' && (
               <div className="form-row" style={{ marginTop: 8 }}>
+                <div><div className="form-label">交易时间{isQdii ? '（QDII 仅作记录）' : ''}</div>
+                  <select className="form-input" value={form.fund_time} onChange={e => setForm({ ...form, fund_time: e.target.value })}>
+                    <option value="before">15:00 之前</option>
+                    <option value="after">15:00 之后</option>
+                  </select></div>
                 <div style={{ alignSelf: 'flex-end', paddingBottom: 8 }}>
                   <label className="qdii-toggle" style={{ display: 'block', marginBottom: 6, cursor: 'pointer', fontSize: 13, color: 'var(--muted)' }}>
                     <input type="checkbox"
@@ -900,16 +915,15 @@ export default function Positions() {
                     非国内基金（QDII，确认份额固定 T+2）
                     {qdiiAuto && <span style={{ color: 'var(--accent)', fontSize: 12, marginLeft: 4 }}>（已自动识别）</span>}
                   </label>
-                  {isQdii
-                    ? <span className="fund-confirm-hint" title="QDII（非国内）基金确认份额为 T+2，不受 15:00 前后影响。">
-                        🌍 <b style={{ color: 'var(--accent)' }}>QDII 非国内基金</b>
-                        <span style={{ marginLeft: 6, color: 'var(--muted)', fontSize: 12 }}>确认份额固定 T+2</span>
-                        <br />📅 确认份额日期：<b style={{ color: 'var(--accent)' }}>{form.trans_date ? fundConfirmDate : '—'}</b>
-                      </span>
-                    : <span className="fund-confirm-hint" title="基金确认份额：15:00 前按当日净值 T+1 确认；15:00 后按下一交易日净值 T+2 确认（跳过周末，不含法定节假日）。若为非国内基金（QDII），请勾选上方选项。">
-                        📅 确认份额日期：<b style={{ color: 'var(--accent)' }}>{form.trans_date ? fundConfirmDate : '—'}</b>
-                        <span style={{ marginLeft: 6, color: 'var(--muted)', fontSize: 12 }}>（{fundRuleText}，T+{fundTPlus}，跳过周末）</span>
-                      </span>}
+                  <span className="fund-confirm-hint" title="确认份额日期基于沪深北交易所官方休市安排计算，跳过周末与法定节假日。境内基金 15:00 前 T+1、15:00 后 T+2；QDII 恒 T+2（15:00 前后仅作记录，不影响 T+2）。">
+                    📅 确认份额日期：<b style={{ color: 'var(--accent)' }}>{form.trans_date ? fundConfirmDate : '—'}</b>
+                    <span style={{ marginLeft: 6, color: 'var(--muted)', fontSize: 12 }}>
+                      （{fundRuleText}，T+{fundTPlus}
+                      {fundConfirm.available ? '，跳过非交易日' : '，⚠️ 休市安排待更新仅跳周末'}）
+                    </span>
+                    {!fundConfirm.available && fundConfirm.holiday_note &&
+                      <div style={{ color: '#e8a33d', fontSize: 12, marginTop: 3 }}>⚠️ {fundConfirm.holiday_note}</div>}
+                  </span>
                 </div>
               </div>
             )}

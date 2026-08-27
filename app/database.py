@@ -57,6 +57,17 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # 持仓级每日快照（收益分析：每个持仓按日市值，用于计算日/月/年/累计收益明细）
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS position_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snap_date TEXT NOT NULL,
+            market TEXT NOT NULL,
+            code TEXT NOT NULL,
+            market_value REAL DEFAULT 0,
+            UNIQUE(snap_date, market, code)
+        )
+    """)
     # 实物黄金：持有克数 + 成本价（元/克）。单行（id=1）。
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gold_holding (
@@ -370,6 +381,70 @@ def get_snapshots():
 
 def today_str():
     return datetime.now().strftime("%Y-%m-%d")
+
+
+# ---------------- 持仓级每日快照（收益分析用） ----------------
+def ensure_position_snapshots_today(items):
+    """确保今天已写入每个持仓的市值快照（幂等，按 (snap_date,market,code) 唯一）。
+    items: [(market, code, market_value), ...]，market_value 为 None 时跳过该持仓当天（行情不可用）。
+    组合分析/持仓页每次计算组合时调用：当天首次写入，之后不覆盖，保证按「每日一条」积累。"""
+    snap_date = today_str()
+    conn = _connect()
+    try:
+        existing = set(
+            (r["market"], r["code"])
+            for r in conn.execute(
+                "SELECT market,code FROM position_snapshots WHERE snap_date=?", (snap_date,)
+            ).fetchall()
+        )
+        for market, code, mv in items:
+            if mv is None:
+                continue  # 行情不可用的持仓当天不记快照（避免脏 0）
+            if (market, code) in existing:
+                continue
+            conn.execute(
+                "INSERT INTO position_snapshots(snap_date,market,code,market_value)"
+                " VALUES(?,?,?,?)",
+                (snap_date, market, code, round(float(mv), 2)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_position_snapshots(market, code):
+    """返回某持仓全部历史快照，按日期升序：[{snap_date, market_value}, ...]"""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT snap_date, market_value FROM position_snapshots"
+            " WHERE market=? AND code=? ORDER BY snap_date",
+            (market, code)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_position_snapshots_on(snap_date):
+    """返回某天所有持仓的市值快照：[(market, code, market_value), ...]"""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT market, code, market_value FROM position_snapshots WHERE snap_date=?",
+            (snap_date,)).fetchall()
+        return [(r["market"], r["code"], r["market_value"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_all_position_snapshot_dates():
+    """返回所有持仓快照的去重日期列表（升序），用于判断历史覆盖范围。"""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT snap_date FROM position_snapshots ORDER BY snap_date").fetchall()
+        return [r["snap_date"] for r in rows]
+    finally:
+        conn.close()
 
 
 # ---------------- 实物黄金 ----------------
@@ -805,6 +880,17 @@ def export_all_data():
     # 持仓置顶 + 行情看板指数配置（跨机器迁移保持一致）
     payload["pinned_positions"] = get_pinned_positions()
     payload["custom_indices"] = get_custom_indices()
+    # 持仓级每日快照（收益分析模块历史明细，历史天数不可重生，必须导出）
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT snap_date, market, code, market_value FROM position_snapshots ORDER BY snap_date, market, code")
+        payload["position_snapshots"] = [
+            {"snap_date": r[0], "market": r[1], "code": r[2], "market_value": r[3]}
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
     return payload
 
 
@@ -812,7 +898,7 @@ def import_all_data(payload):
     """
     用 payload（export_all_data 的产物）整体恢复数据库用户数据。
     先清空全部用户表，再按 payload 写入，保证与导出时一致。
-    返回统计 {watchlist, transactions, snapshots, gold, asset_profit, position_override}。
+    返回统计 {watchlist, transactions, snapshots, gold, asset_profit, position_override, position_snapshots}。
     """
     if not isinstance(payload, dict) or payload.get("app") != "finance-workbench":
         raise ValueError("文件不是有效的金融工作台导出文件")
@@ -828,6 +914,7 @@ def import_all_data(payload):
         cur.execute("DELETE FROM gold_transactions")
         cur.execute("DELETE FROM pinned_positions")
         cur.execute("DELETE FROM custom_indices")
+        cur.execute("DELETE FROM position_snapshots")
         cur.execute("UPDATE gold_holding SET grams=0, cost_price=0, updated_at=datetime('now','localtime') WHERE id=1")
 
         stat = {
@@ -925,6 +1012,16 @@ def import_all_data(payload):
                 cur.execute(
                     "INSERT OR IGNORE INTO custom_indices(name,market,code,sort_order)"
                     " VALUES(?,?,?,?)", (name, market, code, i))
+        # 10) 持仓级每日快照（收益分析历史明细，按 (snap_date,market,code) 幂等写入）
+        pos_snap_count = 0
+        for s in payload.get("position_snapshots", []):
+            cur.execute(
+                "INSERT OR REPLACE INTO position_snapshots(snap_date,market,code,market_value)"
+                " VALUES(?,?,?,?)",
+                (s.get("snap_date", ""), s.get("market", ""), s.get("code", ""),
+                 s.get("market_value", 0)))
+            pos_snap_count += 1
+        stat["position_snapshots"] = pos_snap_count
         conn.commit()
         return stat
     finally:

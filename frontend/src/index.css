@@ -85,6 +85,10 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; text-align: left; p
 td { padding: 11px 12px; border-bottom: 1px solid rgba(42,48,64,.5); font-size: 13px; white-space: nowrap; }
 tr:hover td { background: rgba(88,166,255,.05); }
 .up { color: var(--up); } .down { color: var(--down); } .num { font-variant-numeric: tabular-nums; text-align: right; }
+/* v23：自选基金/标的表头点击切换升/降序 */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--accent); }
+th.sortable .sort-arr { color: var(--accent); font-size: 11px; margin-left: 2px; }
 
 .badge { display: inline-block; padding: 2px 8px; border-radius: 5px; font-size: 11px; background: var(--panel2); color: var(--muted); border: 1px solid var(--border); }
 .badge-a { color: #ff7b72; border-color: rgba(255,123,114,.3); }
@@ -105,6 +109,9 @@ tr:hover td { background: rgba(88,166,255,.05); }
 
 .chart { width: 100%; height: 300px; }
 .chart-md { height: 360px; }
+.chart-scroll { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.chart-scroll input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+.chart-scroll-info { text-align: center; color: var(--muted); font-size: 12px; }
 
 .news-item { padding: 14px 4px; border-bottom: 1px solid rgba(42,48,64,.5); cursor: pointer; }
 .news-item:last-child { border-bottom: none; }
@@ -236,7 +243,8 @@ tr:hover td { background: rgba(88,166,255,.05); }
 .app-footer .src-line b { color: var(--text); font-weight: 500; }
 
 /* #4 持仓分布饼图点击弹窗 */
-.alloc-modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+/* z-index 取 90，低于全局 K 线弹窗 .modal(100)，使点击明细行看 K 线时抽屉浮于列表窗口之上 */
+.alloc-modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 90; }
 .alloc-modal { width: min(520px, 92vw); max-height: 80vh; overflow: auto; background: var(--panel, #161b22); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
 .alloc-modal .am-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .alloc-modal .am-title { font-size: 16px; font-weight: 700; }
@@ -247,6 +255,13 @@ tr:hover td { background: rgba(88,166,255,.05); }
 .alloc-modal th { color: var(--muted); font-weight: 500; font-size: 12px; text-align: left; }
 .alloc-modal td.num, .alloc-modal th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .alloc-modal .am-empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+
+/* 收益分析 - 收益明细表 */
+.pnl-detail { width: 100%; border-collapse: collapse; }
+.pnl-detail th { color: var(--muted); font-weight: 500; font-size: 12px; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.pnl-detail td { padding: 9px 12px; font-size: 13px; border-bottom: 1px solid rgba(42,48,64,.4); cursor: pointer; }
+.pnl-detail tr:hover td { background: rgba(88,166,255,.05); }
+.pnl-detail th.num, .pnl-detail td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* #5 新闻市场/行业标签 */
 .news-tag { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 5px; font-size: 11px; color: var(--muted); background: var(--panel2, #1c2230); border: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }

@@ -87,71 +87,76 @@ def batch_quotes(items: str = Query(..., description="格式: A:sh600519,US:aapl
 # =========================================================
 # K线 + 技术指标
 # =========================================================
+def _fetch_kline(sym, period="day", count=120):
+    """腾讯 fqkline 优先；不足 2 根回退新浪 K 线。任何异常都返回空（由调用方决定提示）。"""
+    k = {"dates": [], "ohlc": [], "volume": []}
+    try:
+        k = ds.tencent_kline(sym, period=period, count=count)
+    except Exception:
+        k = {"dates": [], "ohlc": [], "volume": []}
+    if len(k["dates"]) < 2:
+        try:
+            k = ds.sina_kline(sym, scale=240, datalen=count)
+        except Exception:
+            k = {"dates": [], "ohlc": [], "volume": []}
+    return k
+
+
 @app.get("/api/kline")
 def get_kline(market: str, code: str, period: str = "day", count: int = 120):
     mkt = ds.normalize_market(market)
-    # 基金：用天天基金单位净值历史（无盘中OHLC，构造等值K线）
-    if mkt == "FUND":
-        try:
-            k = ds.fund_kline(code, count=count)
-        except ds.DataSourceError:
-            return fail("基金K线获取失败")
-        if not k["dates"]:
-            return fail("基金K线数据为空")
-    else:
-        sym = ds.to_sina_symbol(mkt, code)
-        if mkt == "US":
-            # 美股/海外指数修复（v22）：
-            # 腾讯 fqkline 对指数只返回 1 天（个股/ETF 才返回完整历史），
-            # 而 usfqkline 指数接口对指数返回完整历史、对个股只返回 1~2 行脏数据。
-            # 故策略：先走个股路径 usCODE.OQ，若拿到 >=2 根K线视为个股直接使用；
-            # 否则当作指数改用 usfqkline（usCODE）取完整历史。
-            # 这样无论内置还是用户自定义的美股/海外指数都显示历史，不再依赖写死白名单
-            #（原 US_INDEX 白名单只会让内置指数走对路径，自定义指数落入个股分支只显示当天）。
+    try:
+        # 基金：用天天基金单位净值历史（无盘中OHLC，构造等值K线）
+        if mkt == "FUND":
             try:
-                k = ds.tencent_kline("us" + code.upper() + ".OQ", period=period, count=count)
+                k = ds.fund_kline(code, count=count)
             except ds.DataSourceError:
-                k = {"dates": [], "ohlc": [], "volume": []}
-            if len(k["dates"]) < 2:
-                # 不是个股 → 按指数处理：改用指数专用接口取完整历史
-                try:
-                    k = ds.tencent_us_index_kline("us" + code.upper(), period=period, count=count)
-                except ds.DataSourceError:
-                    k = {"dates": [], "ohlc": [], "volume": []}
-                if not k["dates"]:
-                    return fail("该指数历史K线数据暂不可用")
-        else:
-            # 国内/港股/黄金/债券等：腾讯 fqkline 为主源；
-            # 但腾讯对部分代码（如北交所 bj899050、个别指数）可能只返回1天空壳或 WAF 拦截，
-            # 此时须回退到新浪拿完整历史。判定规则与美股分支对称：
-            #   腾讯拿到 >=2 根 → 直接用；否则回退新浪；新浪仍为空 → 诚实提示不可用。
+                return fail("基金K线获取失败")
+            if not k["dates"]:
+                return fail("基金K线数据为空")
+        elif mkt == "GOLD":
+            # v23：实物黄金（沪金 au9999）/ 期货黄金指数 K 线。
+            # 实物黄金(code=GOLD_PHYSICAL)固定用 au9999（取不到回退沪金连续）；
+            # 期货指数(纽约金 hf_GC / 沪金 / 伦敦金 hf_XAU)用各自 code。
+            sym = ds.gold_kline_symbol() if code == "GOLD_PHYSICAL" else code
+            k = _fetch_kline(sym, period=period, count=count)
+        elif mkt == "US":
+            # 美股/海外指数修复（v22）：先走个股路径 usCODE.OQ，若拿到 >=2 根视为个股；
+            # 否则当作指数改用 usfqkline（usCODE）取完整历史。
+            sym = "us" + code.upper() + ".OQ"
             try:
                 k = ds.tencent_kline(sym, period=period, count=count)
-            except ds.DataSourceError:
+            except Exception:
                 k = {"dates": [], "ohlc": [], "volume": []}
             if len(k["dates"]) < 2:
                 try:
-                    k = ds.sina_kline(sym, scale=240, datalen=count)
-                except ds.DataSourceError:
-                    k = {"dates": [], "ohlc": [], "volume": []}
+                    k = ds.tencent_us_index_kline("us" + code.upper(), period=period, count=count)
                 except Exception:
-                    # 新浪解析异常（空/null 等）也当无数据，避免 TypeError 冒泡
                     k = {"dates": [], "ohlc": [], "volume": []}
-            if not k["dates"]:
-                return fail("K线数据为空")
-    # 计算指标
-    closes = [o[1] for o in k["ohlc"]]  # close 在 ohlc[1]
-    ma5 = ind.simple_ma(closes, 5)
-    ma10 = ind.simple_ma(closes, 10)
-    ma20 = ind.simple_ma(closes, 20)
-    dif, dea, bar = ind.macd(closes)
-    return ok({
-        "dates": k["dates"],
-        "ohlc": k["ohlc"],
-        "volume": k["volume"],
-        "ma5": ma5, "ma10": ma10, "ma20": ma20,
-        "macdDIF": dif, "macdDEA": dea, "macdBAR": bar,
-    })
+        else:
+            # 国内/港股/黄金/债券等：腾讯 fqkline 为主源；不足 2 根回退新浪。
+            sym = ds.to_sina_symbol(mkt, code)
+            k = _fetch_kline(sym, period=period, count=count)
+        if not k["dates"]:
+            return fail("K线数据暂不可用")
+        # 计算指标
+        closes = [o[1] for o in k["ohlc"]]  # close 在 ohlc[1]
+        ma5 = ind.simple_ma(closes, 5)
+        ma10 = ind.simple_ma(closes, 10)
+        ma20 = ind.simple_ma(closes, 20)
+        dif, dea, bar = ind.macd(closes)
+        return ok({
+            "dates": k["dates"],
+            "ohlc": k["ohlc"],
+            "volume": k["volume"],
+            "ma5": ma5, "ma10": ma10, "ma20": ma20,
+            "macdDIF": dif, "macdDEA": dea, "macdBAR": bar,
+        })
+    except ds.DataSourceError:
+        return fail("K线数据暂不可用")
+    except Exception:
+        # 任何未预期异常都返回友好提示，绝不让端点抛出 500（避免前端 JSON.parse 报 "Internal Server Error"）
+        return fail("K线数据暂不可用")
 
 
 # =========================================================
@@ -226,6 +231,38 @@ def fund_qdii_codes():
 def fund_qdii_check(code: str):
     """判断指定基金代码是否为 QDII（非国内）基金。"""
     return ok({"code": code, "is_qdii": ds.is_qdii_fund(code)})
+
+
+@app.get("/api/fund/confirm-date")
+def fund_confirm_date(trans_date: str, qdii: bool = False, time: str = "before"):
+    """计算基金确认份额日期（跳过周末与官方休市日）。
+
+    - 境内普通基金：15:00 前 -> T+1，15:00 后 -> T+2
+    - QDII（非国内）基金：确认份额固定 T+2（不受 15:00 前后影响）
+    休市数据来源：沪深北交易所官方公告（2026 年）。未覆盖年份 available=False 并提示。
+
+    返回 {confirm_date, rule, available, holiday_source_note}
+    """
+    dt = ds._parse_date(trans_date)
+    if dt is None:
+        return fail("交易日期格式错误，应为 YYYY-MM-DD")
+    tplus = 2 if qdii else (2 if time == "after" else 1)
+    confirm_date, covered = ds.next_cn_trading_day(trans_date, tplus)
+    rule = ("QDII基金 T+2" if qdii else ("15:00后 T+2" if time == "after" else "15:00前 T+1"))
+    if not covered:
+        # 该年份休市安排无真实数据，仅按周末估算，必须提醒用户
+        return ok({
+            "confirm_date": confirm_date,
+            "rule": rule + "（仅跳过周末，法定节假日未知）",
+            "available": False,
+            "holiday_source_note": "该年份休市安排未收录真实数据，仅按周末推算，请手动核对法定节假日",
+        })
+    return ok({
+        "confirm_date": confirm_date,
+        "rule": rule,
+        "available": True,
+        "holiday_source_note": ds.HOLIDAY_SOURCE_NOTE,
+    })
 
 
 @app.get("/api/fund/penetration/holdings")
@@ -637,6 +674,15 @@ def portfolio_summary():
     # 每日净值快照（幂等）：当天首次计算组合时写入，供净值曲线/最大回撤使用。
     # 快照口径与组合汇总一致（含实物黄金按成本兜底），随使用自然积累。
     db.ensure_snapshot_today(round(total_mv, 2), round(total_cost, 2))
+    # 持仓级每日快照（幂等）：同步记录每个持仓当天市值，供收益分析按持仓拆分日/月/年收益。
+    pos_snap_items = []
+    for p in data:
+        if p.get("is_physical_gold"):
+            # 实物黄金一次性写入市场市值（GOLD_PHYSICAL）
+            pos_snap_items.append(("GOLD", "GOLD_PHYSICAL", p.get("market_value")))
+        else:
+            pos_snap_items.append((p.get("market"), p.get("code"), p.get("market_value")))
+    db.ensure_position_snapshots_today(pos_snap_items)
     return ok({
         "totalMarketValue": round(total_mv, 2),
         "totalCost": round(total_cost, 2),
@@ -966,6 +1012,119 @@ def portfolio_performance(period: str = "all"):
         "maxDrawdown": ind.max_drawdown([s["total_market_value"] for s in snaps]),
         "totalReturn": ind.total_return([s["total_market_value"] for s in snaps]),
         "count": len(snaps),
+    })
+
+
+@app.get("/api/portfolio/pnl-analysis")
+def pnl_analysis(type: str = "day", range_val: str = ""):
+    """收益分析：组合级 + 每个持仓在区间内的收益。
+    type: day(日) / month(月) / year(年) / cum(累计)
+    range:
+      - day  -> YYYY-MM-DD（默认今天）
+      - month-> YYYY-MM（默认本月）
+      - year -> YYYY（默认今年）
+      - cum  -> 忽略（全部历史）
+    计算口径（v24 修正）：
+      - 基本单元「日收益」= 每个相邻交易日对（上一交易日 → 当日）的市值差值。
+      - 日收益：仅取「上一个交易日 → 当日」这一对，即所有持仓当日收益的总和。
+      - 月/年收益：累加所选范围内每一天的日收益（而非首末差值）。
+      - 累计收益：所有持仓产品的累计收益总和（每个持仓 最新市值 − 最早市值，再加总）。
+    颜色语义（v24 修正）：红色=赚(正)、绿色=亏(负)。
+    返回 {type, range, combo_pnl, combo_pnl_pct, available, note, details:[{market,code,name,pnl}], calendar:[{date,pnl}]}
+    """
+    snaps = db.get_snapshots()
+    if not snaps:
+        return ok({"type": type, "range": range_val or "—", "combo_pnl": None, "combo_pnl_pct": None,
+                   "available": False, "note": "暂无净值快照，组合分析页每天首次打开会自动记录，积累后才有收益数据",
+                   "details": [], "calendar": []})
+
+    today = db.today_str()
+
+    # ---- 选定区间的相邻交易日对（每对 = 上一交易日 → 当日）----
+    # pairs: list of (prev_snap, cur_snap)
+    def in_range(snap_date: str) -> bool:
+        if type == "day":
+            return snap_date == (range_val or today)
+        if type == "month":
+            return snap_date[:7] == (range_val or today[:7])[:7]
+        if type == "year":
+            return snap_date[:4] == (range_val or today[:4])[:4]
+        return True  # cum：全部
+
+    if type == "day":
+        # 仅取 ≤ target 的最后两条快照（当日 + 上一个交易日）
+        seg = [s for s in snaps if s["snap_date"] <= (range_val or today)]
+        if len(seg) < 2:
+            return ok({"type": type, "range": range_val or today, "combo_pnl": None, "combo_pnl_pct": None,
+                       "available": False, "note": "暂无相邻交易日快照，无法计算日收益（需至少两个交易日的快照）",
+                       "details": [], "calendar": []})
+        pairs = [(seg[-2], seg[-1])]
+        range_label = (range_val or today)
+    else:
+        if type == "month":
+            rng = (range_val or today[:7])[:7]
+        elif type == "year":
+            rng = (range_val or today[:4])[:4]
+        else:
+            rng = None
+        # 取区间内全部快照（升序），再切相邻对
+        seg = [s for s in snaps if in_range(s["snap_date"])]
+        if not seg:
+            note = "该%s暂无净值快照（历史天数不足或尚未到该周期）" % ("月份" if type == "month" else "年份" if type == "year" else "区间")
+            return ok({"type": type, "range": range_val or today, "combo_pnl": None, "combo_pnl_pct": None,
+                       "available": False, "note": note, "details": [], "calendar": []})
+        pairs = [(seg[i - 1], seg[i]) for i in range(1, len(seg))]
+        range_label = (range_val or today[:7]) if type == "month" else (range_val or today[:4]) if type == "year" else ("%s ~ %s" % (seg[0]["snap_date"], seg[-1]["snap_date"]))
+
+    if not pairs:
+        return ok({"type": type, "range": range_label, "combo_pnl": None, "combo_pnl_pct": None,
+                   "available": False, "note": "区间内无相邻交易日，无法计算收益", "details": [], "calendar": []})
+
+    # ---- 累加「日收益」：组合级 + 每个持仓 ----
+    names = { (p.get("market"), p.get("code")): p.get("name") or p.get("code")
+              for p in _positions_data() }
+    combo_pnl = 0.0
+    pos_pnl = {}  # (market, code) -> 区间内日收益累加
+    cal = []      # 每日组合收益（日历图用）
+    for prev, cur in pairs:
+        day_combo = round(cur["total_market_value"] - prev["total_market_value"], 2)
+        combo_pnl = round(combo_pnl + day_combo, 2)
+        cal.append({"date": cur["snap_date"], "pnl": day_combo})
+        # 每个持仓的当日收益
+        prev_items = { (m, c): mv for (m, c, mv) in db.get_position_snapshots_on(prev["snap_date"]) }
+        cur_items = { (m, c): mv for (m, c, mv) in db.get_position_snapshots_on(cur["snap_date"]) }
+        for k in set(prev_items) | set(cur_items):
+            pv = prev_items.get(k)
+            cv = cur_items.get(k)
+            if pv is None or cv is None:
+                continue  # 该持仓当天无快照（如行情不可用/新买入），跳过该日以免误导
+            pos_pnl[k] = round(pos_pnl.get(k, 0.0) + (cv - pv), 2)
+
+    if type == "day":
+        # 区间首末（用于展示 start_date/end_date）
+        start_d, end_d = pairs[0][0]["snap_date"], pairs[0][1]["snap_date"]
+    else:
+        start_d, end_d = pairs[0][0]["snap_date"], pairs[-1][1]["snap_date"]
+
+    # 区间首市值（用于百分比；累计/月年用首末快照的总市值）
+    combo_start = next((s["total_market_value"] for s in snaps if s["snap_date"] == start_d), 0)
+    combo_pnl_pct = round(combo_pnl / combo_start * 100, 2) if combo_start else 0.0
+
+    # 明细：每个持仓区间内日收益累加（与 combo 自洽）
+    details = [{
+        "market": k[0], "code": k[1],
+        "name": names.get(k, k[1]),
+        "pnl": round(v, 2),
+    } for k, v in pos_pnl.items()]
+    details.sort(key=lambda x: x["pnl"], reverse=True)
+
+    return ok({
+        "type": type, "range": range_label,
+        "start_date": start_d, "end_date": end_d,
+        "combo_pnl": combo_pnl, "combo_pnl_pct": combo_pnl_pct,
+        "available": True, "note": "",
+        "details": details,
+        "calendar": cal,
     })
 
 

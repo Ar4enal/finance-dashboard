@@ -15,6 +15,7 @@ const pfmt = (n, market) => (n == null ? '—' : fmt(n, market === 'FUND' ? 4 : 
 export default function Dashboard() {
   const [summary, setSummary] = useState(null)
   const [positions, setPositions] = useState([])
+  const [pnlOffset, setPnlOffset] = useState(0)  // 持仓盈亏分布：滑块窗口偏移（窗口大小 10）
   const refreshSec = useContext(RefreshContext)
   const { openKline } = useKline()
 
@@ -28,6 +29,21 @@ export default function Dashboard() {
     const t = setInterval(load, refreshSec * 1000)  // 按配置频率实时刷新（行情 + 资产）
     return () => clearInterval(t)
   }, [refreshSec])
+
+  // 持仓盈亏分布：按持仓收益（pnl）降序排列，窗口最多展示 10 个，滑块可向右查看更多
+  const pnlAll = positions
+    .filter(p => p.data_available !== false)
+    .slice()
+    .sort((a, b) => {
+      const va = a.pnl == null ? -Infinity : a.pnl
+      const vb = b.pnl == null ? -Infinity : b.pnl
+      if (va !== vb) return vb - va  // 由左至右：收益高（赚）→ 收益低（亏）
+      const ka = a.name || a.code || '', kb = b.name || b.code || ''
+      return ka < kb ? -1 : ka > kb ? 1 : 0  // 同级用名称稳定排序
+    })
+  const pnlMaxScroll = Math.max(0, pnlAll.length - 10)
+  const pnlSafe = Math.min(pnlOffset, pnlMaxScroll)
+  const pnlView = pnlAll.slice(pnlSafe, pnlSafe + 10)
 
   return (
     <section className="page active">
@@ -58,22 +74,32 @@ export default function Dashboard() {
       <div className="dash-grid">
         <div className="card">
           <div className="card-title">持仓盈亏分布</div>
-          {positions.filter(p => p.data_available !== false).length === 0
+          {pnlAll.length === 0
             ? <div className="empty">暂无可用行情数据</div>
-            : <EChart
-            className="chart-md"
-            option={{
-              tooltip: { trigger: 'item', formatter: '{b}: {c}' },
-              grid: { left: 60, right: 20, top: 20, bottom: 30 },
-              xAxis: { type: 'category', data: positions.filter(p => p.data_available !== false).map(p => p.name || p.code), axisLabel: { color: '#8b949e' }, axisLine: { lineStyle: { color: '#2a3040' } } },
-              yAxis: { type: 'value', axisLabel: { color: '#8b949e' }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },
-              series: [{
-                type: 'bar', data: positions.filter(p => p.data_available !== false).map(p => p.pnl || 0),
-                itemStyle: { color: (p) => p.value >= 0 ? '#f85149' : '#3fb950' },
-                label: { show: true, position: 'top', color: '#8b949e', formatter: '{c}' },
-              }],
-            }}
-          />}
+            : <>
+              <EChart
+                className="chart-md"
+                option={{
+                  tooltip: { trigger: 'item', formatter: '{b}: {c}' },
+                  grid: { left: 60, right: 20, top: 20, bottom: 30 },
+                  xAxis: { type: 'category', data: pnlView.map(p => p.name || p.code), axisLabel: { color: '#8b949e' }, axisLine: { lineStyle: { color: '#2a3040' } } },
+                  yAxis: { type: 'value', axisLabel: { color: '#8b949e' }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },
+                  series: [{
+                    type: 'bar', data: pnlView.map(p => p.pnl || 0),
+                    itemStyle: { color: (p) => p.value >= 0 ? '#f85149' : '#3fb950' },
+                    label: { show: true, position: 'top', color: '#8b949e', formatter: '{c}' },
+                  }],
+                }}
+              />
+              {pnlMaxScroll > 0 && (
+                <div className="chart-scroll">
+                  <input type="range" min={0} max={pnlMaxScroll} step={1} value={pnlSafe}
+                    onChange={(e) => setPnlOffset(Number(e.target.value))}
+                    aria-label="持仓盈亏分布滑动条" />
+                  <div className="chart-scroll-info">第 {pnlSafe + 1}–{pnlSafe + pnlView.length} 个 / 共 {pnlAll.length} 个持仓</div>
+                </div>
+              )}
+            </>}
         </div>
         <div className="card">
           <div className="card-title">持仓概览</div>

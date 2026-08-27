@@ -18,6 +18,8 @@ export const api = {
   fundPenetrate: (code) => request(`/api/fund/penetrate?code=${code}`),
   fundPenetrationHoldings: () => request('/api/fund/penetration/holdings'),
   fundQdiiCheck: (code) => request(`/api/fund/qdii/check?code=${encodeURIComponent(code)}`),
+  // 基金确认份额日期（跳过周末与官方休市日）：qdii=是否非国内基金，time=before/after(15:00前后)
+  fundConfirmDate: (transDate, qdii, time) => request(`/api/fund/confirm-date?trans_date=${encodeURIComponent(transDate)}&qdii=${!!qdii}&time=${time || 'before'}`),
   // 自选
   watchlist: () => request('/api/watchlist'),
   addWatch: (market, code, name) => request(`/api/watchlist?market=${market}&code=${code}${name ? '&name=' + encodeURIComponent(name) : ''}`, { method: 'POST' }),
@@ -47,6 +49,8 @@ export const api = {
   portfolioAllocation: (by) => request(`/api/portfolio/allocation?by=${by}`),
   // 组合净值曲线（每日快照）：period=all|30|90
   portfolioPerformance: (period = 'all') => request(`/api/portfolio/performance?period=${period}`),
+  // 收益分析：type=day|month|year|cum，range=YYYY-MM-DD|YYYY-MM|YYYY（cum 忽略）
+  pnlAnalysis: (type, range) => request(`/api/portfolio/pnl-analysis?type=${type}${range ? '&range=' + encodeURIComponent(range) : ''}`),
   // 资产收益编辑（过滤未传参数，避免 undefined 拼进 URL）
   saveProfit: (market, code, holding, cum) => {
     const params = new URLSearchParams()
