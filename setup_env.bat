@@ -44,17 +44,28 @@ if not defined PYTHON_CMD (
 
 REM ---------- 2. Check Python version (require 3.7-3.12) ----------
 echo [setup] Checking Python version...
-%PYTHON_CMD% -c "import sys; v=sys.version_info; exit(0 if v[0]==3 and 7<=v[1]<=12 else 1)"
-if errorlevel 1 (
-    for /f "delims=" %%v in ('%PYTHON_CMD% -c "import sys; print('%%d.%%d' %% sys.version_info[:2])"') do set "PY_VERSION=%%v"
+for /f "tokens=2" %%v in ('%PYTHON_CMD% --version 2^>^&1') do set "PY_VERSION=%%v"
+if not defined PY_VERSION (
+    echo [FAIL] Cannot determine Python version from: %PYTHON_CMD%
+    goto :end
+)
+for /f "tokens=1,2 delims=." %%a in ("%PY_VERSION%") do set "MAJ=%%a" & set "MIN=%%b"
+set "OK_VER=0"
+if "%MAJ%"=="3" (
+    if %MIN% GEQ 7 (
+        if %MIN% LEQ 12 (
+            set "OK_VER=1"
+        )
+    )
+)
+if not "%OK_VER%"=="1" (
     echo [FAIL] Python %PY_VERSION% is not supported.
-    echo        This project pins fastapi 0.99.1 + pydantic 1.10 (v1), which is
+    echo        This project pins fastapi 0.99.1 + pydantic 1.10 ^(v1^), which is
     echo        incompatible with Python 3.13+. Please install Python 3.7-3.12
-    echo        (recommended 3.12) and re-run setup_env.bat.
+    echo        ^(recommended 3.12^) and re-run setup_env.bat.
     echo        Download: https://www.python.org/downloads/
     goto :end
 )
-for /f "delims=" %%v in ('%PYTHON_CMD% -c "import sys; print('%%d.%%d' %% sys.version_info[:2])"') do set "PY_VERSION=%%v"
 echo [ OK  ] Python version: %PY_VERSION%
 
 REM ---------- 3. Detect pip ----------
@@ -72,8 +83,17 @@ if errorlevel 1 (
 REM ---------- 4. Create virtual environment ----------
 set "VENV_DIR=%SCRIPT_DIR%.venv"
 if exist "%VENV_DIR%\Scripts\python.exe" (
-    echo [ OK  ] Virtual environment already exists, skip creation
-) else (
+    REM Reuse only if the venv's own Python matches the detected target version
+    set "VENV_VER="
+    for /f "tokens=2" %%v in ('"%VENV_DIR%\Scripts\python.exe" --version 2^>^&1') do set "VENV_VER=%%v"
+    if "%VENV_VER%"=="%PY_VERSION%" (
+        echo [ OK  ] Virtual environment already exists (Python %VENV_VER%), skip creation
+    ) else (
+        echo [WARN] Existing venv is Python %VENV_VER% but target is %PY_VERSION%. Recreating...
+        rmdir /s /q "%VENV_DIR%"
+    )
+)
+if not exist "%VENV_DIR%\Scripts\python.exe" (
     echo [setup] Creating virtual environment...
     %PYTHON_CMD% -m venv "%VENV_DIR%"
     if errorlevel 1 (
