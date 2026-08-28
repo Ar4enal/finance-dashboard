@@ -50,7 +50,18 @@ export const api = {
   // 组合净值曲线（每日快照）：period=all|30|90
   portfolioPerformance: (period = 'all') => request(`/api/portfolio/performance?period=${period}`),
   // 收益分析：type=day|month|year|cum，range=YYYY-MM-DD|YYYY-MM|YYYY（cum 忽略）
-  pnlAnalysis: (type, range) => request(`/api/portfolio/pnl-analysis?type=${type}${range ? '&range=' + encodeURIComponent(range) : ''}`),
+  pnlAnalysis: (type, range) => request(`/api/portfolio/pnl-analysis?type=${type}${range ? '&range_val=' + encodeURIComponent(range) : ''}`),
+  // 总览卡片详情：近 N 天每日收益序列（holding=当前持仓收益 / cum=累计收益）
+  pnlSeries: (days = 30, kind = 'holding') => request(`/api/portfolio/pnl-series?days=${days}&kind=${kind}`),
+  // 收益分析编辑覆盖（v25）
+  savePnlOverride: (market, code, pnlType, rangeVal, detailPnl, comboPnl) => {
+    const params = new URLSearchParams()
+    params.set('market', market); params.set('code', code)
+    params.set('pnl_type', pnlType); params.set('range_val', rangeVal || '')
+    if (detailPnl != null && !isNaN(detailPnl)) params.set('detail_pnl', detailPnl)
+    if (comboPnl != null && !isNaN(comboPnl)) params.set('combo_pnl', comboPnl)
+    return request(`/api/pnl-override?${params.toString()}`, { method: 'POST' })
+  },
   // 资产收益编辑（过滤未传参数，避免 undefined 拼进 URL）
   saveProfit: (market, code, holding, cum) => {
     const params = new URLSearchParams()

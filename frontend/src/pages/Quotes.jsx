@@ -48,6 +48,10 @@ const sortByPct = (arr, dir = 'desc') => (arr || []).slice().sort((a, b) => {
   return dir === 'asc' ? pa - pb : pb - pa
 })
 
+// v26：预估日收益 = 日涨跌幅 × 当前持仓市值；基金 code 在持仓中带 fu_ 前缀，按 key 归一化匹配
+const normCode = (market, code) => (market === 'FUND' ? String(code).replace(/^fu_/, '') : String(code))
+const rowKey = (market, code) => `${market}:${normCode(market, code)}`
+
 // v23：行情看板暂不展示单独的「场内基金穿透」模块（保留代码，恢复时置 true）
 const SHOW_PENETRATION = false
 
@@ -73,11 +77,19 @@ export default function Quotes() {
   const [penLoading, setPenLoading] = useState(false)
   const [penetrations, setPenetrations] = useState([])  // 持仓基金穿透概览
   const [watchlist, setWatchlist] = useState([])
-  const [fundDir, setFundDir] = useState('desc')   // 自选基金：日涨跌幅排序方向（desc 降序 / asc 升序）
-  const [watchDir, setWatchDir] = useState('desc') // 自选标的：涨跌幅排序方向
+  const [fundSort, setFundSort] = useState({ key: 'pct', dir: 'desc' }) // 自选基金排序：key=pct(日涨跌幅)/pnl(预估日收益)，dir=asc/desc
+  const [watchSort, setWatchSort] = useState({ key: 'pct', dir: 'desc' }) // 自选标的排序
   const { openKline } = useKline()
   const [search, setSearch] = useState('')
   const [gold, setGold] = useState(null)
+  const [mvMap, setMvMap] = useState({}) // (market:code) -> 持仓市值，用于预估日收益
+  // 异动跟踪阈值（1%~10%，默认5%），localStorage 持久化（v26）
+  const [anomalyPct, setAnomalyPct] = useState(() => {
+    try { const v = parseFloat(localStorage.getItem('fw_anomaly_pct')); return (v >= 1 && v <= 10) ? v : 5 } catch { return 5 }
+  })
+  const setAnomaly = (v) => { setAnomalyPct(v); try { localStorage.setItem('fw_anomaly_pct', String(v)) } catch {} }
+  // 点击表头切换排序：同列则翻转方向，异列则按该列降序
+  const toggleSort = (set, cur, key) => set(cur.key === key ? { key, dir: cur.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' })
   // 指数配置（用户可自定义选择/新增/删除，后端持久化）
   const [indices, setIndices] = useState([])
   const [showAddIndex, setShowAddIndex] = useState(false)
@@ -121,12 +133,18 @@ export default function Quotes() {
       }
       // 合并「持仓管理」中的已持仓基金（自选基金同步于持仓）
       let heldFunds = []
+      const mv = {}
       try {
         const pos = await api.positions()
         heldFunds = (pos || [])
           .filter(p => p.market === 'FUND' && p.code)
           .map(p => ({ market: 'FUND', code: String(p.code), name: p.name || p.code, held: true }))
+        // 构建 (market:code) -> 持仓市值 映射，用于预估日收益（基金 code 归一化去 fu_ 前缀）
+        ;(pos || []).forEach(p => {
+          if (p.market_value != null) mv[rowKey(p.market, p.code)] = p.market_value
+        })
       } catch {}
+      setMvMap(mv)
       // 合并 watchlist FUND + 持仓基金（按 code 去重）
       const watchFunds = (data || []).filter(w => w.market === 'FUND')
       const fundByCode = {}
@@ -299,9 +317,30 @@ export default function Quotes() {
     return fmt(n, 0)
   }
 
-  // 渲染时按方向排序（点击表头切换 fundDir / watchDir）
-  const sortedFunds = sortByPct(funds, fundDir)
-  const sortedWatch = sortByPct(watchlist, watchDir)
+  // 排序取值：pct=日涨跌幅，pnl=预估日收益（日涨跌幅 × 持仓市值）；缺失者沉底
+  const valOf = (it, key) => {
+    if (!it) return null
+    if (key === 'pct') return it.pct != null ? Number(it.pct) : null
+    if (key === 'pnl') {
+      if (it.pct == null) return null
+      const mvv = mvMap[rowKey(it.market, it.code)]
+      return mvv != null ? (it.pct / 100) * mvv : null
+    }
+    return null
+  }
+  const sortRows = (arr, sort) => (arr || []).slice().sort((a, b) => {
+    const va = valOf(a, sort.key), vb = valOf(b, sort.key)
+    if (va === vb) return 0
+    if (va === null || va === undefined) return 1  // 缺失沉底
+    if (vb === null || vb === undefined) return -1
+    return sort.dir === 'asc' ? va - vb : vb - va
+  })
+  // 渲染时按当前排序键/方向排序（点击表头即时切换，无需重新请求）
+  const sortedFunds = sortRows(funds, fundSort)
+  const sortedWatch = sortRows(watchlist, watchSort)
+  // 异动判定：当日涨幅 > 阈值 或 跌幅 < -阈值
+  const isAnomaly = (it) => it && it.pct != null && (it.pct > anomalyPct || it.pct < -anomalyPct)
+  const anomalies = [...funds, ...watchlist].filter(isAnomaly)
 
   return (
     <section className="page active">
@@ -339,6 +378,17 @@ export default function Quotes() {
           </span>
         )}
       </div>
+
+      {/* v26：异动提醒横幅（涨跌幅超阈值时标亮并提醒） */}
+      {anomalies.length > 0 && (
+        <div className="anomaly-banner">
+          <b>⚠️ 异动提醒</b>（阈值 {anomalyPct}%）：
+          {anomalies.map(a => (
+            <span key={a.market + a.code} className="anomaly-chip">{a.name || a.code} {sign(a.pct)}%</span>
+          ))}
+          触发涨跌幅异动，已在下方标亮。
+        </div>
+      )}
 
       {/* 指数大字卡（用户可自定义新增/删除，后端持久化） */}
       <div className="index-block">
@@ -473,22 +523,39 @@ export default function Quotes() {
         <div className="index-head">
           <span className="index-title">💼 自选基金</span>
           <span style={{ color: 'var(--muted)', fontSize: 12 }}>点击查看详情</span>
+          <span style={{ flex: 1 }} />
+          <span className="anomaly-set">
+            异动阈值
+            <select className="anomaly-sel" value={anomalyPct} onChange={e => setAnomaly(Number(e.target.value))} title="涨跌幅异动跟踪阈值（1%~10%，同时作用于自选标的）">
+              {[1,2,3,4,5,6,7,8,9,10].map(n => <option key={n} value={n}>{n}%</option>)}
+            </select>
+          </span>
         </div>
         <table className="fund-table">
-          <thead><tr><th>名称</th><th>产品代码</th><th className="num">最新净值</th><th className="num sortable" onClick={() => setFundDir(d => d === 'asc' ? 'desc' : 'asc')} title="点击切换升序 / 降序">日涨跌幅 <span className="sort-arr">{fundDir === 'asc' ? '↑' : '↓'}</span></th><th>操作</th></tr></thead>
+          <thead><tr>
+            <th>名称</th><th>产品代码</th><th className="num">最新净值</th>
+            <th className="num sortable" onClick={() => toggleSort(setFundSort, fundSort, 'pct')} title="点击切换升序 / 降序">日涨跌幅 <span className="sort-arr">{fundSort.key === 'pct' ? (fundSort.dir === 'asc' ? '↑' : '↓') : ''}</span></th>
+            <th className="num sortable" onClick={() => toggleSort(setFundSort, fundSort, 'pnl')} title="点击切换升序 / 降序">预估日收益 <span className="sort-arr">{fundSort.key === 'pnl' ? (fundSort.dir === 'asc' ? '↑' : '↓') : ''}</span></th>
+            <th>操作</th>
+          </tr></thead>
           <tbody>
-            {sortedFunds.map(f => (
-              <tr key={f.code} style={f.available === false ? { cursor: 'default' } : {}}>
+            {sortedFunds.map(f => {
+              const est = valOf(f, 'pnl')
+              const anom = isAnomaly(f)
+              return (
+              <tr key={f.code} className={anom ? 'anomaly' : ''} style={f.available === false ? { cursor: 'default' } : {}}>
                 <td className="f-name fund-name-link" onClick={() => f.available !== false && openFund(f.code)}>
                   {f.name || f.code}
                   {f.held && <span className="badge badge-gold" style={{ marginLeft: 6 }}>持仓</span>}
+                  {anom && <span className="anomaly-tag" title="涨跌幅触发异动阈值">异动</span>}
                 </td>
                 <td className="fund-code" onClick={() => f.available !== false && openFund(f.code)}>{f.code}</td>
                 {f.available === false
-                  ? <td className="num muted" colSpan={2}>数据暂不可用</td>
+                  ? <td className="num muted" colSpan={3}>数据暂不可用</td>
                   : <>
                       <td className="num" style={{ fontWeight: 600 }}>{fmt(f.price, 4)}</td>
                       <td className={`num ${cls(f.pct)}`}>{sign(f.pct)}%</td>
+                      <td className={`num ${cls(est)}`}>{est == null ? '—' : '¥' + sign(est)}</td>
                     </>}
                 <td className="op-col">
                   {f.available !== false && <span className="badge badge-blue" onClick={() => openFund(f.code)}>查看详情 ›</span>}
@@ -496,7 +563,8 @@ export default function Quotes() {
                     : <button className="btn-danger" onClick={() => removeFund(f.id)}>删除</button>}
                 </td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
         {funds.length === 0 && <div className="empty">暂无自选基金，在下方输入 6 位基金代码添加</div>}
@@ -509,23 +577,41 @@ export default function Quotes() {
         <button className="btn-ghost" onClick={() => { fetchIndex(); fetchWatchlist() }}>⟳ 刷新</button>
       </div>
       <div className="card">
-        <div className="card-title">自选标的</div>
+        <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          自选标的
+          <span className="anomaly-set" style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 400 }}>
+            异动阈值
+            <select className="anomaly-sel" value={anomalyPct} onChange={e => setAnomaly(Number(e.target.value))} title="涨跌幅异动跟踪阈值（1%~10%，同时作用于自选基金）">
+              {[1,2,3,4,5,6,7,8,9,10].map(n => <option key={n} value={n}>{n}%</option>)}
+            </select>
+          </span>
+        </div>
         <table>
-          <thead><tr><th>名称</th><th>市场</th><th className="num">最新价</th><th className="num">涨跌额</th><th className="num sortable" onClick={() => setWatchDir(d => d === 'asc' ? 'desc' : 'asc')} title="点击切换升序 / 降序">涨跌幅 <span className="sort-arr">{watchDir === 'asc' ? '↑' : '↓'}</span></th><th>操作</th></tr></thead>
+          <thead><tr>
+            <th>名称</th><th>市场</th><th className="num">最新价</th><th className="num">涨跌额</th>
+            <th className="num sortable" onClick={() => toggleSort(setWatchSort, watchSort, 'pct')} title="点击切换升序 / 降序">涨跌幅 <span className="sort-arr">{watchSort.key === 'pct' ? (watchSort.dir === 'asc' ? '↑' : '↓') : ''}</span></th>
+            <th className="num sortable" onClick={() => toggleSort(setWatchSort, watchSort, 'pnl')} title="点击切换升序 / 降序">预估日收益 <span className="sort-arr">{watchSort.key === 'pnl' ? (watchSort.dir === 'asc' ? '↑' : '↓') : ''}</span></th>
+            <th>操作</th>
+          </tr></thead>
           <tbody>
-            {sortedWatch.map(q => (
-              <tr key={q.id}>
-                <td>{q.name || q.code}</td>
+            {sortedWatch.map(q => {
+              const est = valOf(q, 'pnl')
+              const anom = isAnomaly(q)
+              return (
+              <tr key={q.id} className={anom ? 'anomaly' : ''}>
+                <td>{q.name || q.code}{anom && <span className="anomaly-tag" title="涨跌幅触发异动阈值">异动</span>}</td>
                 <td><span className="badge badge-a">{q.market}</span></td>
                 <td className="num" style={{ fontWeight: 600 }}>{q.available === false ? <span className="muted">数据暂不可用</span> : fmt(q.price)}</td>
                 <td className={`num ${cls(q.chg)}`}>{q.available === false ? <span className="muted">—</span> : sign(q.chg)}</td>
                 <td className={`num ${cls(q.pct)}`}>{q.available === false ? <span className="muted">—</span> : sign(q.pct) + '%'}</td>
+                <td className={`num ${cls(est)}`}>{est == null ? '—' : '¥' + sign(est)}</td>
                 <td>
                   <button className="btn btn-sm" onClick={() => q.available !== false && openKline(q.market, q.code, q.name)}>K线</button>
                   <button className="btn-danger" onClick={() => removeWatch(q.id)}>删除</button>
                 </td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
         {watchlist.length === 0 && <div className="empty">暂无自选标的，输入代码添加</div>}

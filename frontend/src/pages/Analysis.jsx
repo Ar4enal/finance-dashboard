@@ -81,6 +81,26 @@ export default function Analysis() {
   }
   useEffect(() => { loadPnl() }, [pnlType, pnlRange, refreshSec])
 
+  // 点击日历图某天 → 切到日收益并定位到该日期（v25 修复：点击后刷新到目标日期）
+  const onCalClick = (params) => {
+    const date = params && params.data && (params.data[0] || (params.data.value && params.data.value[0]))
+    if (!date) return
+    if (pnlType !== 'day') setPnlType('day')
+    setPnlRange(date)
+    // pnlRange 变化会触发 useEffect(loadPnl) 自动刷新；这里再显式加载一次确保即时生效
+    api.pnlAnalysis('day', date).then(setPnl).catch(() => {})
+  }
+
+  // 收益分析编辑覆盖（v25）：组合总收益 / 每个持仓区间收益 可手动编辑并持久化
+  const savePnlOverride = (market, code, detailPnl, comboPnl) => {
+    const range = pnlType === 'day' ? pnlRange
+      : pnlType === 'month' ? pnlRange.slice(0, 7)
+      : pnlType === 'year' ? pnlRange.slice(0, 4) : ''
+    api.savePnlOverride(market, code, pnlType, range, detailPnl, comboPnl)
+      .then(() => loadPnl())
+      .catch(() => {})
+  }
+
   // 点击饼图元素 → 弹出该分组下的持仓明细
   const onPieClick = (params) => {
     const group = alloc.find(a => a.name === params.name)
@@ -212,25 +232,38 @@ export default function Analysis() {
           <>
             <div className="metric" style={{ marginBottom: 12 }}>
               <div className="m"><div className="l">区间</div><div className="v" style={{ fontSize: 14 }}>{pnl.range}</div></div>
-              <div className="m"><div className="l">{pnlType === 'day' ? '当日' : pnlType === 'month' ? '本月' : pnlType === 'year' ? '本年' : '累计'}收益</div><div className={`v ${cls(pnl.combo_pnl)}`}>{sign(pnl.combo_pnl)}</div><div className="l">{sign(pnl.combo_pnl_pct)}%</div></div>
+              <div className="m">
+                <div className="l">{pnlType === 'day' ? '当日' : pnlType === 'month' ? '本月' : pnlType === 'year' ? '本年' : '累计'}收益（点击编辑）</div>
+                <input className={`v pnl-edit ${cls(pnl.combo_pnl)}`} type="number" step="0.01" defaultValue={pnl.combo_pnl ?? 0}
+                  key={`combo-${pnlType}-${pnl.range}-${pnl.combo_pnl}`}
+                  onBlur={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) savePnlOverride('__COMBO__', '__COMBO__', null, v) }}
+                  onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }} title="手动修正组合总收益（持久化）" />
+                <div className="l">{sign(pnl.combo_pnl_pct)}%{pnl.combo_edited ? ' · 已编辑' : ''}</div>
+              </div>
               <div className="m"><div className="l">持仓数</div><div className="v">{pnl.details.length}</div></div>
             </div>
             {/* 图表：日历 / 柱状 */}
             {pnlChart === 'calendar' ? (
-              <EChart className="chart-md" option={buildCalendarOption(pnl)} />
+              <EChart className="chart-md" onEvents={{ click: onCalClick }} option={buildCalendarOption(pnl)} />
             ) : (
               <EChart className="chart-md" option={buildBarOption(pnl)} />
             )}
-            {/* 收益明细：每个持仓在区间内的收益 */}
-            <div className="card-title" style={{ marginTop: 14, fontSize: 14 }}>收益明细（每个持仓在区间内收益）</div>
+            {/* 收益明细：每个持仓在区间内的收益（区间收益列可编辑） */}
+            <div className="card-title" style={{ marginTop: 14, fontSize: 14 }}>收益明细（每个持仓在区间内收益，点击数值可编辑）</div>
             <table className="pnl-detail">
-              <thead><tr><th>市场</th><th>代码</th><th>名称</th><th className="num">区间收益</th></tr></thead>
+              <thead><tr><th>市场</th><th>代码</th><th>名称</th><th className="num">区间收益（可编辑）</th></tr></thead>
               <tbody>
                 {pnl.details.length === 0 && <tr><td colSpan={4} className="am-empty">该区间无持仓收益明细（可能持仓快照不足或区间内无交易）</td></tr>}
                 {pnl.details.map((d, i) => (
-                  <tr key={i} style={{ cursor: 'pointer' }} onClick={() => openKline(d.market, d.code, d.name)} title="点击查看 K 线行情">
-                    <td>{d.market}</td><td>{d.code}</td><td>{d.name}</td>
-                    <td className={`num ${cls(d.pnl)}`}>{sign(d.pnl)}</td>
+                  <tr key={i}>
+                    <td>{d.market}</td><td>{d.code}</td><td style={{ cursor: 'pointer' }} onClick={() => openKline(d.market, d.code, d.name)} title="点击查看 K 线行情">{d.name}</td>
+                    <td className="num">
+                      <input className={`pnl-edit ${cls(d.pnl)}`} type="number" step="0.01" defaultValue={d.pnl ?? 0}
+                        key={`${d.market}-${d.code}-${pnlType}-${pnl.range}-${d.pnl}`}
+                        onBlur={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) savePnlOverride(d.market, d.code, v, null) }}
+                        onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }} title="手动修正该持仓区间收益（持久化）" />
+                      {d.edited ? <span className="pnl-edited-tag">已编辑</span> : null}
+                    </td>
                   </tr>
                 ))}
               </tbody>

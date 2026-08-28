@@ -148,6 +148,23 @@ def init_db():
             UNIQUE(market, code)
         )
     """)
+    # 收益分析编辑覆盖：用户手动修正某「类型+范围」下某持仓的收益值（v25 新增）。
+    # pnl_type: day/month/year/cum；range_val: 对应范围（day=YYYY-MM-DD / month=YYYY-MM / year=YYYY / cum 空）。
+    # code='__COMBO__' 表示组合总收益覆盖；其余为具体持仓。
+    # detail_pnl: 该持仓在区间内的覆盖收益；combo_pnl: 组合总收益覆盖（仅 __COMBO__ 行使用）。
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pnl_override (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            code TEXT NOT NULL,
+            pnl_type TEXT NOT NULL,
+            range_val TEXT NOT NULL DEFAULT '',
+            detail_pnl REAL,
+            combo_pnl REAL,
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(market, code, pnl_type, range_val)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -750,6 +767,65 @@ def get_custom_indices():
         conn.close()
 
 
+# ---------------- 收益分析编辑覆盖（v25）----------------
+COMBO_CODE = "__COMBO__"
+
+def get_pnl_override(market, code, pnl_type, range_val):
+    """取某 (market,code,pnl_type,range_val) 的覆盖收益；无则返回 None。"""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT detail_pnl, combo_pnl FROM pnl_override WHERE market=? AND code=? AND pnl_type=? AND range_val=?",
+            (market, code, pnl_type, range_val or "")).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def save_pnl_override(market, code, pnl_type, range_val, detail_pnl=None, combo_pnl=None, clear=False):
+    """保存/清除某 (market,code,pnl_type,range_val) 的收益覆盖。
+    clear=True 时删除该行；否则 upsert（detail_pnl/combo_pnl 为 None 表示该字段不改，但首次写入需给值）。
+    """
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        if clear:
+            cur.execute(
+                "DELETE FROM pnl_override WHERE market=? AND code=? AND pnl_type=? AND range_val=?",
+                (market, code, pnl_type, range_val or ""))
+            conn.commit()
+            return True
+        existing = cur.execute(
+            "SELECT detail_pnl, combo_pnl FROM pnl_override WHERE market=? AND code=? AND pnl_type=? AND range_val=?",
+            (market, code, pnl_type, range_val or "")).fetchone()
+        if existing:
+            nd = detail_pnl if detail_pnl is not None else existing["detail_pnl"]
+            nc = combo_pnl if combo_pnl is not None else existing["combo_pnl"]
+            cur.execute(
+                "UPDATE pnl_override SET detail_pnl=?, combo_pnl=?, updated_at=datetime('now','localtime')"
+                " WHERE market=? AND code=? AND pnl_type=? AND range_val=?",
+                (nd, nc, market, code, pnl_type, range_val or ""))
+        else:
+            cur.execute(
+                "INSERT INTO pnl_override(market,code,pnl_type,range_val,detail_pnl,combo_pnl)"
+                " VALUES(?,?,?,?,?,?)",
+                (market, code, pnl_type, range_val or "", detail_pnl, combo_pnl))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_all_pnl_overrides():
+    """返回全部覆盖 [{market,code,pnl_type,range_val,detail_pnl,combo_pnl}]，供导入导出。"""
+    conn = _connect()
+    try:
+        rows = conn.execute("SELECT market,code,pnl_type,range_val,detail_pnl,combo_pnl FROM pnl_override").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def add_custom_index(name, market, code):
     """新增一个指数（幂等，重复 (market,code) 忽略）。返回新记录或已存在记录。"""
     conn = _connect()
@@ -889,6 +965,8 @@ def export_all_data():
             {"snap_date": r[0], "market": r[1], "code": r[2], "market_value": r[3]}
             for r in cur.fetchall()
         ]
+        # 收益分析编辑覆盖（v25）
+        payload["pnl_override"] = get_all_pnl_overrides()
     finally:
         conn.close()
     return payload
@@ -915,6 +993,7 @@ def import_all_data(payload):
         cur.execute("DELETE FROM pinned_positions")
         cur.execute("DELETE FROM custom_indices")
         cur.execute("DELETE FROM position_snapshots")
+        cur.execute("DELETE FROM pnl_override")
         cur.execute("UPDATE gold_holding SET grams=0, cost_price=0, updated_at=datetime('now','localtime') WHERE id=1")
 
         stat = {
@@ -1022,6 +1101,16 @@ def import_all_data(payload):
                  s.get("market_value", 0)))
             pos_snap_count += 1
         stat["position_snapshots"] = pos_snap_count
+        # 11) 收益分析编辑覆盖（v25，按唯一键幂等写入）
+        pnl_ov_count = 0
+        for o in payload.get("pnl_override", []):
+            cur.execute(
+                "INSERT OR REPLACE INTO pnl_override(market,code,pnl_type,range_val,detail_pnl,combo_pnl,updated_at)"
+                " VALUES(?,?,?,?,?,?,datetime('now','localtime'))",
+                (o.get("market", ""), o.get("code", ""), o.get("pnl_type", ""), o.get("range_val", ""),
+                 o.get("detail_pnl"), o.get("combo_pnl")))
+            pnl_ov_count += 1
+        stat["pnl_override"] = pnl_ov_count
         conn.commit()
         return stat
     finally:

@@ -492,6 +492,39 @@ def sina_kline(symbol, scale=240, datalen=120):
     return {"dates": dates, "ohlc": ohlc, "volume": volume}
 
 
+def sina_futures_kline(symbol, count=120):
+    """新浪期货日K线（沪金/纽约金等内盘期货）。
+    symbol: AU0(沪金连续) / GC0(纽约金) 等。
+    返回统一格式 {"dates","ohlc","volume"}；空数据时抛 DataSourceError。
+    字段: d=日期 o=开 h=高 l=低 c=收 v=量 p=持仓 s=结算。
+    """
+    url = ("https://stock2.finance.sina.com.cn/futures/api/json.php/"
+           "InnerFuturesNewService.getDailyKLine?symbol=%s" % symbol)
+    text = _get(url, headers=SINA_HEADERS, decode="utf-8")
+    import json
+    try:
+        data = json.loads(text)
+    except Exception:
+        raise DataSourceError("新浪期货K线解析失败")
+    if not isinstance(data, list) or not data:
+        raise DataSourceError("新浪期货K线数据为空")
+    dates, ohlc, volume = [], [], []
+    for row in data:
+        if not isinstance(row, dict) or "d" not in row:
+            continue
+        try:
+            dates.append(row["d"])
+            ohlc.append([float(row["o"]), float(row["c"]), float(row["l"]), float(row["h"])])
+            volume.append(float(row.get("v", 0) or 0))
+        except (ValueError, TypeError):
+            continue
+    if not dates:
+        raise DataSourceError("新浪期货K线数据为空")
+    return {"dates": dates[-count:], "ohlc": ohlc[-count:], "volume": volume[-count:]}
+
+
+
+
 # ---------------------------------------------------------------
 # 3.5 基金 K 线（天天基金单位净值历史）
 # ---------------------------------------------------------------

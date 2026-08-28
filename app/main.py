@@ -115,11 +115,25 @@ def get_kline(market: str, code: str, period: str = "day", count: int = 120):
             if not k["dates"]:
                 return fail("基金K线数据为空")
         elif mkt == "GOLD":
-            # v23：实物黄金（沪金 au9999）/ 期货黄金指数 K 线。
+            # v25：实物黄金 / 期货黄金指数 K 线。
             # 实物黄金(code=GOLD_PHYSICAL)固定用 au9999（取不到回退沪金连续）；
-            # 期货指数(纽约金 hf_GC / 沪金 / 伦敦金 hf_XAU)用各自 code。
-            sym = ds.gold_kline_symbol() if code == "GOLD_PHYSICAL" else code
-            k = _fetch_kline(sym, period=period, count=count)
+            # 期货指数：沪金(nf_AU0/AU0)→新浪 AU0、纽约金(hf_GC)→新浪 GC0、伦敦金(hf_XAU)→新浪 XAUUSD。
+            # 腾讯 fqkline 对黄金期货代码返回空，故黄金期货统一走新浪期货日K线接口；
+            # 真实数据源确实取不到时（如纽约金/伦敦金在可访问源为空）诚实返回提示，绝不造假。
+            if code == "GOLD_PHYSICAL":
+                # 实物黄金（沪金）K线：沪金连续 AU0（新浪期货，真实数据；au9999 现货无历史K线源）
+                try:
+                    k = ds.sina_futures_kline("AU0", count=count)
+                except ds.DataSourceError as e:
+                    return fail("实物黄金K线数据源暂不可用（%s）" % str(e))
+            else:
+                futures_map = {"nf_AU0": "AU0", "AU0": "AU0", "hf_GC": "GC0", "hf_XAU": "XAUUSD"}
+                fsym = futures_map.get(code, code)
+                try:
+                    k = ds.sina_futures_kline(fsym, count=count)
+                except ds.DataSourceError as e:
+                    # 纽约金/伦敦金等真实数据源暂不可达：诚实提示，不回退造假
+                    return fail("该黄金品种K线数据源暂不可用（%s）" % str(e))
         elif mkt == "US":
             # 美股/海外指数修复（v22）：先走个股路径 usCODE.OQ，若拿到 >=2 根视为个股；
             # 否则当作指数改用 usfqkline（usCODE）取完整历史。
@@ -753,6 +767,17 @@ def _positions_data():
             quotes = ds.sina_quotes([sym])
             q = quotes.get(sym, {})
             price = q.get("price", 0)
+            # 基金：市值用单位净值（NAV）计算，而非盘中实时价（v25 需求3）。
+            # NAV 每日收盘后才更新——取 NAV 最新一条即「当日已更新用当日、否则自动为前一交易日」。
+            if p["market"] == "FUND":
+                import re as _re
+                fcode = _re.sub(r'^fu_', '', str(p["code"]))
+                try:
+                    fk = ds.fund_kline(fcode, count=1)
+                    if fk["dates"] and fk["ohlc"]:
+                        price = fk["ohlc"][-1][1]
+                except ds.DataSourceError:
+                    price = 0  # NAV 取不到则无法计算基金市值
             mv = price * p["quantity"]
             holding_pnl = mv - p["cost"]
             holding_pnl_pct = round(holding_pnl / p["cost"] * 100, 2) if p["cost"] else 0
@@ -860,6 +885,28 @@ def save_profit(market: str = Query(..., description="市场标识，如 A/US/HK
                                   clear_holding=clear_holding, clear_cum=clear_cum)
     ov = db.get_asset_profit_overrides().get((mkt, code), {"holding": None, "cum": None, "cum_base": None})
     return ok({"market": mkt, "code": code, **ov})
+
+
+# =========================================================
+# 收益分析编辑覆盖（v25）
+# =========================================================
+@app.post("/api/pnl-override")
+def save_pnl_override(market: str = Query(..., description="市场标识；组合总收益用 __COMBO__"),
+                      code: str = Query(..., description="代码；组合总收益用 __COMBO__"),
+                      pnl_type: str = Query(..., description="day/month/year/cum"),
+                      range_val: str = Query("", description="范围：day=YYYY-MM-DD/month=YYYY-MM/year=YYYY/cum 空"),
+                      detail_pnl: Optional[float] = Query(None, description="该持仓区间收益覆盖值；仅持仓行使用"),
+                      combo_pnl: Optional[float] = Query(None, description="组合总收益覆盖值；仅 __COMBO__ 行使用"),
+                      clear: Optional[str] = Query(None, description="传 '1' 清除该覆盖")):
+    """保存/清除收益分析某「类型+范围」下某持仓（或组合总收益）的收益编辑覆盖。
+    market/code 传 __COMBO__ 表示组合总收益；其余为具体持仓。clear='1' 删除覆盖恢复自动计算。"""
+    mkt = market if market == db.COMBO_CODE else ds.normalize_market(market)
+    c = code  # code 原样存储（持仓代码或 __COMBO__）
+    if pnl_type not in ("day", "month", "year", "cum"):
+        return fail("pnl_type 须为 day/month/year/cum")
+    db.save_pnl_override(mkt, c, pnl_type, range_val or "",
+                         detail_pnl=detail_pnl, combo_pnl=combo_pnl, clear=(clear == "1"))
+    return ok({"saved": True, "market": mkt, "code": c, "pnl_type": pnl_type, "range_val": range_val or ""})
 
 
 # =========================================================
@@ -1081,24 +1128,37 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
                    "available": False, "note": "区间内无相邻交易日，无法计算收益", "details": [], "calendar": []})
 
     # ---- 累加「日收益」：组合级 + 每个持仓 ----
+    # v27 修复：用户在 day 视图编辑的「日收益」(pnl_override, pnl_type='day', range_val=日期)
+    # 视为该日收益单元的最终值，向上聚合到 month/year/cum，并同步到日历图。
     names = { (p.get("market"), p.get("code")): p.get("name") or p.get("code")
               for p in _positions_data() }
     combo_pnl = 0.0
     pos_pnl = {}  # (market, code) -> 区间内日收益累加
     cal = []      # 每日组合收益（日历图用）
     for prev, cur in pairs:
-        day_combo = round(cur["total_market_value"] - prev["total_market_value"], 2)
-        combo_pnl = round(combo_pnl + day_combo, 2)
-        cal.append({"date": cur["snap_date"], "pnl": day_combo})
-        # 每个持仓的当日收益
+        day_date = cur["snap_date"]
+        day_combo = 0.0
+        # 每个持仓的当日收益（优先套用 day 类型覆盖，否则用快照差值）
         prev_items = { (m, c): mv for (m, c, mv) in db.get_position_snapshots_on(prev["snap_date"]) }
-        cur_items = { (m, c): mv for (m, c, mv) in db.get_position_snapshots_on(cur["snap_date"]) }
+        cur_items = { (m, c): mv for (m, c, mv) in db.get_position_snapshots_on(day_date) }
         for k in set(prev_items) | set(cur_items):
             pv = prev_items.get(k)
             cv = cur_items.get(k)
             if pv is None or cv is None:
                 continue  # 该持仓当天无快照（如行情不可用/新买入），跳过该日以免误导
-            pos_pnl[k] = round(pos_pnl.get(k, 0.0) + (cv - pv), 2)
+            base = round(cv - pv, 2)
+            # v27：套用该持仓该日的 day 覆盖（编辑日收益联动月/年/累计 + 日历图）
+            ov_day = db.get_pnl_override(k[0], k[1], "day", day_date)
+            if ov_day and ov_day.get("detail_pnl") is not None:
+                base = round(ov_day["detail_pnl"], 2)
+            pos_pnl[k] = round(pos_pnl.get(k, 0.0) + base, 2)
+            day_combo = round(day_combo + base, 2)
+        # v27：套用组合级 day 覆盖（直接设定当日组合收益）
+        combo_ov_day = db.get_pnl_override(db.COMBO_CODE, db.COMBO_CODE, "day", day_date)
+        if combo_ov_day and combo_ov_day.get("combo_pnl") is not None:
+            day_combo = round(combo_ov_day["combo_pnl"], 2)
+        combo_pnl = round(combo_pnl + day_combo, 2)
+        cal.append({"date": day_date, "pnl": day_combo})
 
     if type == "day":
         # 区间首末（用于展示 start_date/end_date）
@@ -1116,21 +1176,62 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
         "name": names.get(k, k[1]),
         "pnl": round(v, 2),
     } for k, v in pos_pnl.items()]
+    # 套用用户编辑覆盖（每个持仓在某类型+范围下的收益）
+    for d in details:
+        ov = db.get_pnl_override(d["market"], d["code"], type, range_label)
+        if ov and ov.get("detail_pnl") is not None:
+            d["pnl"] = round(ov["detail_pnl"], 2)
+            d["edited"] = True
     details.sort(key=lambda x: x["pnl"], reverse=True)
+
+    # 组合总收益覆盖（code=__COMBO__）
+    combo_ov = db.get_pnl_override(db.COMBO_CODE, db.COMBO_CODE, type, range_label)
+    if combo_ov and combo_ov.get("combo_pnl") is not None:
+        combo_pnl = round(combo_ov["combo_pnl"], 2)
+        combo_edited = True
+    else:
+        combo_edited = False
+    combo_pnl_pct = round(combo_pnl / combo_start * 100, 2) if combo_start else 0.0
 
     return ok({
         "type": type, "range": range_label,
         "start_date": start_d, "end_date": end_d,
         "combo_pnl": combo_pnl, "combo_pnl_pct": combo_pnl_pct,
+        "combo_edited": combo_edited,
         "available": True, "note": "",
         "details": details,
         "calendar": cal,
     })
 
 
-# =========================================================
-# 报表
-# =========================================================
+@app.get("/api/portfolio/pnl-series")
+def pnl_series(days: int = 30, kind: str = "holding"):
+    """近 N 天每日收益序列（用于总览卡片点击查看详情的折线图）。
+    kind: holding（当前持仓收益走势）= 每日 总市值-总成本；cum（累计收益走势）= 每日 累计收益（含已实现）。
+    返回 {dates, daily_pnl, cumulative_pnl, latest_date}；最右为当前日期，可向左滑动至第一条记录。
+    """
+    snaps = db.get_snapshots()
+    if not snaps:
+        return ok({"dates": [], "daily_pnl": [], "cumulative_pnl": [], "latest_date": ""})
+    recent = snaps[-days:] if len(snaps) >= days else snaps
+    dates, daily, cum = [], [], []
+    running = 0.0
+    for i in range(1, len(recent)):
+        prev, cur = recent[i - 1], recent[i]
+        day_combo = round(cur["total_market_value"] - prev["total_market_value"], 2)
+        daily.append(day_combo)
+        running += day_combo
+        dates.append(cur["snap_date"])
+        if kind == "holding":
+            cum.append(round(cur["total_market_value"] - cur["total_cost"], 2))
+        else:
+            cum.append(round(running, 2))
+    return ok({
+        "dates": dates,
+        "daily_pnl": daily,
+        "cumulative_pnl": cum,
+        "latest_date": dates[-1] if dates else "",
+    })# =========================================================
 @app.get("/api/reports/export")
 def report_export(fmt: str = "csv"):
     # CSV 导出持仓 + 交易

@@ -12,16 +12,52 @@ const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
 // v21：场外基金净值显示 4 位小数，其他市场 2 位
 const pfmt = (n, market) => (n == null ? '—' : fmt(n, market === 'FUND' ? 4 : 2))
 
+// 总览卡片详情：近一个月每日收益折线图（v26）。最右当前日期，dataZoom 可向左滑动至第一条记录。
+function buildPnlSeriesOption(d, kind) {
+  const dates = d.dates || []
+  const series = kind === 'holding' ? (d.cumulative_pnl || []) : (d.cumulative_pnl || [])
+  const daily = d.daily_pnl || []
+  return {
+    animation: false,
+    tooltip: { trigger: 'axis', formatter: p => {
+      const i = p[0].dataIndex
+      return `${dates[i]}<br/>当日收益 ${sign(daily[i])}<br/>累计 ${sign(series[i])}`
+    } },
+    grid: { left: 64, right: 20, top: 24, bottom: 56 },
+    xAxis: { type: 'category', data: dates, axisLabel: { color: '#8b949e', rotate: dates.length > 15 ? 40 : 0 }, axisLine: { lineStyle: { color: '#2a3040' } } },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: '#8b949e', formatter: v => v >= 1e4 ? (v / 1e4).toFixed(1) + '万' : v }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },
+    dataZoom: [
+      { type: 'inside', start: 0, end: 100 },
+      { type: 'slider', start: 0, end: 100, height: 18, bottom: 18, borderColor: '#2a3040', textStyle: { color: '#8b949e' } },
+    ],
+    series: [{
+      name: kind === 'holding' ? '当前持仓收益' : '累计收益',
+      type: 'line', data: series, smooth: false, showSymbol: false,
+      lineStyle: { color: '#58a6ff', width: 2 },
+      areaStyle: { color: 'rgba(88,166,255,.10)' },
+      markLine: { silent: true, symbol: 'none', lineStyle: { color: '#3a4150', type: 'dashed' }, data: [{ yAxis: 0 }] },
+    }],
+  }
+}
+
+
 export default function Dashboard() {
   const [summary, setSummary] = useState(null)
   const [positions, setPositions] = useState([])
   const [pnlOffset, setPnlOffset] = useState(0)  // 持仓盈亏分布：滑块窗口偏移（窗口大小 10）
+  const [pnlDetail, setPnlDetail] = useState(null)  // 总览卡片详情弹窗 {kind, title, data}
   const refreshSec = useContext(RefreshContext)
   const { openKline } = useKline()
 
   const load = () => {
     api.portfolioSummary().then(setSummary).catch(() => {})
     api.positions().then(setPositions).catch(() => {})
+  }
+
+  // 总览卡片点击 → 查看近一个月收益折线图（v26）
+  const openPnlDetail = (kind) => {
+    const title = kind === 'holding' ? '当前持仓收益 · 近一个月走势' : '累计收益 · 近一个月走势'
+    api.pnlSeries(30, kind).then(d => setPnlDetail({ kind, title, data: d })).catch(() => setPnlDetail(null))
   }
 
   useEffect(() => {
@@ -60,13 +96,13 @@ export default function Dashboard() {
       <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
         <div className="stat"><div className="label">总资产</div><div className="value">{money(summary?.totalMarketValue)}</div></div>
         <div className="stat"><div className="label">总成本</div><div className="value">{money(summary?.totalCost)}</div></div>
-        <div className="stat">
-          <div className="label">当前持仓收益</div>
+        <div className="stat" style={{ cursor: 'pointer' }} title="点击查看近一个月收益走势" onClick={() => openPnlDetail('holding')}>
+          <div className="label">当前持仓收益 <span style={{ color: 'var(--accent)' }}>📈</span></div>
           <div className={`value ${cls(summary?.totalHoldingPnl)}`}>{sign(summary?.totalHoldingPnl)}</div>
           <div className={`sub ${cls(summary?.totalHoldingPnlPct)}`}>{sign(summary?.totalHoldingPnlPct)}%</div>
         </div>
-        <div className="stat">
-          <div className="label">累计收益</div>
+        <div className="stat" style={{ cursor: 'pointer' }} title="点击查看近一个月收益走势" onClick={() => openPnlDetail('cum')}>
+          <div className="label">累计收益 <span style={{ color: 'var(--accent)' }}>📈</span></div>
           <div className={`value ${cls(summary?.totalCumPnl)}`}>{sign(summary?.totalCumPnl)}</div>
           <div className="sub" style={{ color: 'var(--muted)', fontSize: 11 }}>含已实现盈利</div>
         </div>
@@ -139,6 +175,26 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {/* 总览卡片详情：近一个月收益折线图（v26） */}
+      {pnlDetail && (
+        <div className="alloc-modal-mask" onClick={() => setPnlDetail(null)}>
+          <div className="modal-card" style={{ width: 'min(860px, 94vw)' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <span>{pnlDetail.title}</span>
+              <button className="modal-close" onClick={() => setPnlDetail(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              {pnlDetail.data && pnlDetail.data.dates && pnlDetail.data.dates.length
+                ? <>
+                    <EChart className="chart-lg" option={buildPnlSeriesOption(pnlDetail.data, pnlDetail.kind)} />
+                    <div className="pnl-series-foot">最右为当前日期（{pnlDetail.data.latest_date}）；拖动下方滑块或滚轮可向左滑动查看更早记录。</div>
+                  </>
+                : <div className="empty">暂无收益记录（组合分析页需积累至少 2 天快照）</div>}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
