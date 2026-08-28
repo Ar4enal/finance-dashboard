@@ -1,13 +1,13 @@
-# 金融工作台 - Python 3.7 兼容依赖（最小集）
-# 注意：版本号已按 Python 3.7 兼容性锁定，勿随意升级（新版要求 py>=3.8）
+# Finance Dashboard - Python 3.7-compatible dependencies (minimal set)
+# NOTE: Versions are pinned for Python 3.7 compatibility. Do NOT upgrade casually (newer versions require py>=3.8).
 #
-# 兼容性说明（均已实测）：
-#   1) fastapi 0.99.1 是 py3.7 的末代稳定版；0.100+ 要求 py>=3.8。
-#   2) fastapi 0.99.1 配套依赖约束：
-#        - pydantic <2.0  (即 v1)   → 使用 pydantic 1.10.14 (v1 最终版，支持 py3.7)
-#        - starlette <0.28.0, >=0.27.0 → 不手动指定，交由 pip 自动解析（fastapi 会自动拉取）
-#   3) 因此下面【不】手动锁定 starlette，避免版本冲突。
-fastapi==0.99.1          # Web 框架（py3.7 兼容末代稳定版，自动拉取配套 starlette）
-uvicorn==0.22.0          # ASGI 服务器（py3.7 兼容版）
-pydantic==1.10.14        # 数据校验 v1（py3.7 最终版，匹配 fastapi 0.99.x 的 <2.0 约束）
-requests==2.31.0         # 行情/新闻 HTTP 请求
+# Compatibility notes (all verified in practice):
+#   1) fastapi 0.99.1 is the last stable release supporting py3.7; 0.100+ requires py>=3.8.
+#   2) fastapi 0.99.1 dependency constraints:
+#        - pydantic <2.0 (i.e. v1) -> use pydantic 1.10.14 (final v1, supports py3.7)
+#        - starlette <0.28.0, >=0.27.0 -> NOT pinned manually; let pip resolve it (fastapi pulls the right one)
+#   3) Therefore starlette is NOT pinned below, to avoid version conflicts.
+fastapi==0.99.1          # Web framework (last py3.7-compatible stable release; auto-pulls matching starlette)
+uvicorn==0.22.0          # ASGI server (py3.7-compatible)
+pydantic==1.10.14        # Data validation v1 (final py3.7 release, matches fastapi 0.99.x <2.0 constraint)
+requests==2.31.0         # HTTP client for quotes/news

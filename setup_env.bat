@@ -1,5 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
+REM Force UTF-8 mode so pip reads UTF-8 files and the venv Python handles Chinese data correctly
+set PYTHONUTF8=1
 REM ============================================================
 REM Finance Dashboard - Windows environment setup script (Python 3.7-3.12)
 REM ------------------------------------------------------------
@@ -82,25 +84,43 @@ if errorlevel 1 (
 
 REM ---------- 4. Create virtual environment ----------
 set "VENV_DIR=%SCRIPT_DIR%.venv"
+set "VENV_REBUILD=0"
 if exist "%VENV_DIR%\Scripts\python.exe" (
-    REM Reuse only if the venv's own Python matches the detected target version
     set "VENV_VER="
     for /f "tokens=2" %%v in ('"%VENV_DIR%\Scripts\python.exe" --version 2^>^&1') do set "VENV_VER=%%v"
-    if "%VENV_VER%"=="%PY_VERSION%" (
-        echo [ OK  ] Virtual environment already exists (Python %VENV_VER%), skip creation
+    if not defined VENV_VER (
+        set "VENV_REBUILD=1"
     ) else (
-        echo [WARN] Existing venv is Python %VENV_VER% but target is %PY_VERSION%. Recreating...
-        rmdir /s /q "%VENV_DIR%"
+        for /f "tokens=1,2 delims=." %%a in ("%VENV_VER%") do (
+            if not "%%a"=="3" (
+                set "VENV_REBUILD=1"
+            ) else (
+                if %%b GEQ 13 (
+                    set "VENV_REBUILD=1"
+                ) else if not "%%b"=="%MIN%" (
+                    set "VENV_REBUILD=1"
+                )
+            )
+        )
     )
+) else (
+    set "VENV_REBUILD=1"
 )
-if not exist "%VENV_DIR%\Scripts\python.exe" (
-    echo [setup] Creating virtual environment...
+if "%VENV_REBUILD%"=="1" (
+    if exist "%VENV_DIR%" (
+        echo [WARN] Recreating virtual environment with Python %PY_VERSION%...
+        rmdir /s /q "%VENV_DIR%"
+    ) else (
+        echo [setup] Creating virtual environment with Python %PY_VERSION%...
+    )
     %PYTHON_CMD% -m venv "%VENV_DIR%"
     if errorlevel 1 (
         echo [FAIL] Virtual environment creation failed. Check Python install integrity.
         goto :end
     )
-    echo [ OK  ] Virtual environment created
+    echo [ OK  ] Virtual environment ready
+) else (
+    echo [ OK  ] Virtual environment already exists, Python %VENV_VER%, reuse
 )
 
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
@@ -153,10 +173,10 @@ echo [setup] Checking node environment...
 where node >nul 2>&1
 if errorlevel 1 (
     echo [WARN] node not detected, skip frontend build.
-    echo [WARN] Will use delivered frontend_dist build artifact (included, ready to use).
+    echo [WARN] Will use delivered frontend_dist build artifact, included and ready to use.
 ) else (
     if exist "%SCRIPT_DIR%frontend\package.json" (
-        echo [ OK  ] node detected, building frontend (needs network for deps, slower)...
+        echo [ OK  ] node detected, building frontend, needs network for deps and is slower...
         pushd "%SCRIPT_DIR%frontend"
         call npm install >nul 2>&1
         call npm run build

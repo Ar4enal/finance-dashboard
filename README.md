@@ -104,6 +104,7 @@ bash operation.sh status             # 查看运行状态
 5. 校验前端产物
 
 > 脚本可重复运行：若 `.venv` 已存在且 Python 版本与本次检测到的目标（如 3.12）一致则复用，否则会**自动删除并重建**（避免复用旧版本 Python 建的残留 venv 导致依赖错配）。配置完成后窗口会显示提示。
+> 兼容性补充（v29.2）：两个 `.bat` 顶部已加 `set PYTHONUTF8=1`，强制 pip 与 venv 内 Python 以 UTF-8 处理中文（含港股持仓中文数据导入导出）；`requirements.txt` 注释已转纯 ASCII，避免 Windows 下 pip 以 GBK 解码失败。
 
 #### 第 2 步：启动应用
 双击运行 **`operation.bat`**（或命令行 `operation.bat`）。默认端口 **8000**，监听 `0.0.0.0` 可局域网访问。

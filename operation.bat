@@ -1,5 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
+REM Force UTF-8 mode so the running app reads/writes Chinese financial data (e.g. HK positions) correctly
+set PYTHONUTF8=1
 REM ============================================================
 REM Finance Dashboard - Windows one-click start/stop script
 REM ------------------------------------------------------------
@@ -23,9 +25,9 @@ if "%PORT%"=="" set "PORT=8000"
 set "HOST=0.0.0.0"
 
 REM ---------- Get LAN IP ----------
-for /f "delims=" %%i in ('powershell -NoProfile -Command "$p=Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {$_.IPv4DefaultGateway -ne $null} | Select-Object -First 1; if($p){$p.IPv4Address.IPAddress}else{''}"') do set "LAN_IP=%%i"
+for /f "delims=" %%i in ('powershell -NoProfile -Command "$p=Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {$_.IPv4DefaultGateway -ne $null} | Select-Object -First 1; if($p){$p.IPv4Address.IPAddress}else{""}"') do set "LAN_IP=%%i"
 if "%LAN_IP%"=="" (
-    for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.IPAddress -ne '127.0.0.1'} | Select-Object -First 1).IPAddress"') do set "LAN_IP=%%i"
+    for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.IPAddress -ne "127.0.0.1"} | Select-Object -First 1).IPAddress"') do set "LAN_IP=%%i"
 )
 if "%LAN_IP%"=="" set "LAN_IP=127.0.0.1"
 
@@ -47,9 +49,9 @@ if /i "%CMD%"=="status" goto :status
 REM ---------- Start ----------
 :start
 if "%RUNNING%"=="1" (
-    echo [start] Backend already running (PID %OLD_PID%). No need to start again.
+    echo [start] Backend already running PID %OLD_PID%. No need to start again.
     echo [start] Local:    http://localhost:%PORT%
-    echo [start] LAN:      http://%LAN_IP%:%PORT% (open in a browser on the same network)
+    echo [start] LAN:      http://%LAN_IP%:%PORT% open in a browser on the same network
     goto :end
 )
 if not exist "%SCRIPT_DIR%.venv\Scripts\python.exe" (
@@ -73,7 +75,7 @@ if exist "%LOG_FILE%" (
 )
 echo [start] Local:    http://localhost:%PORT%
 if "%HOST%"=="0.0.0.0" (
-    echo [start] LAN:      http://%LAN_IP%:%PORT% (open in a browser on the same network)
+    echo [start] LAN:      http://%LAN_IP%:%PORT% open in a browser on the same network
 )
 echo [start] To stop:  double-click operation.bat stop, or run: operation.bat stop
 goto :end
@@ -81,7 +83,7 @@ goto :end
 REM ---------- Stop ----------
 :stop
 if "%RUNNING%"=="1" (
-    echo [stop] Stopping backend (PID %OLD_PID%)...
+    echo [stop] Stopping backend PID %OLD_PID%...
     taskkill /PID %OLD_PID% /F >nul 2>&1
     REM Kill by port to avoid killing other python programs
     for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"') do (
@@ -101,7 +103,7 @@ goto :start
 REM ---------- Status ----------
 :status
 if "%RUNNING%"=="1" (
-    echo [status] Running (PID %OLD_PID%)
+    echo [status] Running PID %OLD_PID%
     echo [status] Local:    http://localhost:%PORT%
     echo [status] LAN:      http://%LAN_IP%:%PORT%
 ) else (
