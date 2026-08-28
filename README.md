@@ -1,6 +1,6 @@
 # 金融工作台 — 个人投资者投资记账与行情工具
 
-> 适配你的环境：**Linux / Windows 双平台**（Python 3.7+，Linux 实测 3.7.3）。提供跨平台环境配置脚本，自动补装 venv 并安装最小依赖。Linux 用 `setup_env.sh` + `operation.sh`，Windows 用 `setup_env.bat` + `operation.bat`，两步启动。
+> 适配你的环境：**Linux / Windows 双平台**（Python 3.7+，Linux 实测 3.7.3）。提供跨平台环境配置脚本，自动补装 venv 并安装最小依赖。Linux 用 `setup_env.sh` + `operation.sh`，Windows 用 `setup_env.bat` + `operation.bat`，两步启动。前端安卓apk参考https://github.com/Ar4enal/finance-dashboard-android-source
 >
 > **业务定位**：投资/交易工作台 + 资产组合管理。**仅做记账和行情查看，不接券商真实下单。**
 
@@ -93,11 +93,11 @@ bash operation.sh status             # 查看运行状态
 
 ### 🪟 Windows 环境
 
-> **前置**：安装 Python 3.7+（建议 3.8/3.9），安装时务必勾选 **"Add Python to PATH"**。下载：https://www.python.org/downloads/
+> **前置**：安装 **Python 3.7–3.12（推荐 3.12）**，安装时务必勾选 **"Add Python to PATH"**。⚠️ **不支持 Python 3.13**：本项目锁定 `fastapi 0.99.1 + pydantic 1.10(v1)`，pydantic v1 与 3.13 不兼容（导入即崩溃）。下载：https://www.python.org/downloads/
 
 #### 第 1 步：配置环境（只需一次）
 双击运行 **`setup_env.bat`**（或命令行执行 `setup_env.bat`）。脚本会自动：
-1. 定位并检测 Python（`python` 或 `py`，需 ≥3.7）
+1. 定位并检测 Python（`py -3.12` 优先，其次 `python`/`py`，需 **3.7–3.12**，3.13 会被拦截并提示）
 2. 创建虚拟环境 `.venv`
 3. 升级 pip 并安装最小依赖（锁定 Python 3.7 兼容版本，失败自动切清华镜像）
 4. 检测 node，有则构建前端；无则使用交付的 `frontend_dist` 构建产物
@@ -161,7 +161,7 @@ operation.bat status        查看运行状态
 | pydantic | 1.10.14 | 数据校验（v1，匹配 fastapi 0.99.x 的 `<2.0` 约束） |
 | requests | 2.31.0 | 行情/新闻请求 |
 
-> ⚠️ 兼容性陷阱：fastapi 0.99.1 依赖 **pydantic v1（<2.0）**，不可用 pydantic v2；starlette 会自动匹配 0.27.x，无需也不应手动指定（手动指定 0.29.0 会冲突）。本脚本已在沙箱实测通过。
+> ⚠️ 兼容性陷阱：fastapi 0.99.1 依赖 **pydantic v1（<2.0）**，不可用 pydantic v2；starlette 会自动匹配 0.27.x，无需也不应手动指定（手动指定 0.29.0 会冲突）。**Python 仅支持 3.7–3.12，3.13 与 pydantic v1 不兼容（导入即报 `ForwardRef._evaluate() missing 1 required keyword-only argument: 'recursive_guard'`）**；`setup_env.bat` 已自动拦截 3.13 并提示安装 3.12。本脚本已在沙箱实测通过。
 
 ---
 

@@ -1,16 +1,16 @@
 @echo off
 chcp 65001 >nul 2>&1
 REM ============================================================
-REM 金融工作台 - Windows 环境配置脚本 (Python 3.7+)
+REM Finance Dashboard - Windows environment setup script (Python 3.7-3.12)
 REM ------------------------------------------------------------
-REM 作用：
-REM   1. 检测 Python（python 或 py）
-REM   2. 创建虚拟环境 .venv
-REM   3. 安装 Python 3.7 兼容的最小依赖（fastapi + uvicorn + requests）
-REM   4. 检测 node 并构建前端（有 node 则 build，无则跳过，用交付的 frontend_dist）
-REM   5. 校验启动所需文件
-REM 用法：双击运行，或命令行执行 setup_env.bat
-REM 可重复执行（幂等），不污染系统 Python
+REM What it does:
+REM   1. Detect Python (python or py)
+REM   2. Create virtual environment .venv
+REM   3. Install Python 3.7-3.12 compatible minimal deps (fastapi + uvicorn + requests)
+REM   4. Detect node and build frontend (build if node present, else skip using delivered frontend_dist)
+REM   5. Verify required files
+REM Usage: double-click to run, or: setup_env.bat
+REM Idempotent. Does not pollute system Python.
 REM ============================================================
 
 setlocal
@@ -19,142 +19,152 @@ cd /d "%SCRIPT_DIR%"
 
 echo.
 echo ==============================================
-echo   金融工作台 · Windows 环境配置开始
+echo   Finance Dashboard - Windows setup start
 echo ==============================================
 
-REM ---------- 1. 定位 Python ----------
+REM ---------- 1. Locate Python (prefer a 3.7-3.12 interpreter) ----------
 set "PYTHON_CMD="
-where python >nul 2>&1 && set "PYTHON_CMD=python"
+REM Prefer py launcher with an explicit compatible version (avoids Python 3.13)
+for %%m in (3.12 3.11 3.10 3.9 3.8 3.7) do (
+    if not defined PYTHON_CMD (
+        py -%%m --version >nul 2>&1 && set "PYTHON_CMD=py -%%m"
+    )
+)
+if not defined PYTHON_CMD (
+    where python >nul 2>&1 && set "PYTHON_CMD=python"
+)
 if not defined PYTHON_CMD (
     where py >nul 2>&1 && set "PYTHON_CMD=py"
 )
 if not defined PYTHON_CMD (
-    echo [FAIL] 未找到 Python，请先安装 Python 3.7+ 并勾选 "Add Python to PATH"
-    echo        下载地址：https://www.python.org/downloads/
+    echo [FAIL] Python not found. Install Python 3.7-3.12 and tick "Add Python to PATH".
+    echo        Download: https://www.python.org/downloads/
     goto :end
 )
 
-REM ---------- 2. 检测 Python 版本 ----------
-echo [setup] 检测 Python 版本...
-%PYTHON_CMD% -c "import sys; v=sys.version_info; exit(0 if v[0]==3 and v[1]>=7 else 1)"
+REM ---------- 2. Check Python version (require 3.7-3.12) ----------
+echo [setup] Checking Python version...
+%PYTHON_CMD% -c "import sys; v=sys.version_info; exit(0 if v[0]==3 and 7<=v[1]<=12 else 1)"
 if errorlevel 1 (
-    echo [FAIL] 需要 Python 3.7 及以上版本，请升级 Python
+    for /f "delims=" %%v in ('%PYTHON_CMD% -c "import sys; print('%%d.%%d' %% sys.version_info[:2])"') do set "PY_VERSION=%%v"
+    echo [FAIL] Python %PY_VERSION% is not supported.
+    echo        This project pins fastapi 0.99.1 + pydantic 1.10 (v1), which is
+    echo        incompatible with Python 3.13+. Please install Python 3.7-3.12
+    echo        (recommended 3.12) and re-run setup_env.bat.
+    echo        Download: https://www.python.org/downloads/
     goto :end
 )
 for /f "delims=" %%v in ('%PYTHON_CMD% -c "import sys; print('%%d.%%d' %% sys.version_info[:2])"') do set "PY_VERSION=%%v"
-echo [ OK  ] 当前 Python 版本：%PY_VERSION%
+echo [ OK  ] Python version: %PY_VERSION%
 
-REM ---------- 3. 检测 pip ----------
-echo [setup] 检测 pip...
+REM ---------- 3. Detect pip ----------
+echo [setup] Checking pip...
 %PYTHON_CMD% -m pip --version >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] 未检测到 pip，尝试引导安装...
+    echo [WARN] pip not detected, trying to bootstrap...
     %PYTHON_CMD% -m ensurepip --upgrade >nul 2>&1
     if errorlevel 1 (
-        echo [FAIL] pip 安装失败，请手动运行: %PYTHON_CMD% -m ensurepip --upgrade
+        echo [FAIL] pip bootstrap failed. Run manually: %PYTHON_CMD% -m ensurepip --upgrade
         goto :end
     )
 )
 
-REM ---------- 4. 创建虚拟环境 ----------
+REM ---------- 4. Create virtual environment ----------
 set "VENV_DIR=%SCRIPT_DIR%.venv"
 if exist "%VENV_DIR%\Scripts\python.exe" (
-    echo [ OK  ] 虚拟环境已存在，跳过创建
+    echo [ OK  ] Virtual environment already exists, skip creation
 ) else (
-    echo [setup] 创建虚拟环境...
+    echo [setup] Creating virtual environment...
     %PYTHON_CMD% -m venv "%VENV_DIR%"
     if errorlevel 1 (
-        echo [FAIL] 虚拟环境创建失败，请检查 Python 安装完整性
+        echo [FAIL] Virtual environment creation failed. Check Python install integrity.
         goto :end
     )
-    echo [ OK  ] 虚拟环境创建成功
+    echo [ OK  ] Virtual environment created
 )
 
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 if not exist "%VENV_PY%" (
-    echo [FAIL] 未找到虚拟环境 Python，请删除 .venv 文件夹后重试
+    echo [FAIL] Virtual environment Python not found. Delete .venv and retry.
     goto :end
 )
 
-REM 兜底：若 venv 内 pip 模块不可用，用 ensurepip 修复
+REM Fallback: repair pip inside venv if missing
 %VENV_PY% -m pip --version >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] 虚拟环境缺少 pip 模块，尝试修复...
+    echo [WARN] venv missing pip module, trying to repair...
     %VENV_PY% -m ensurepip --upgrade >nul 2>&1
     if errorlevel 1 (
-        echo [FAIL] pip 修复失败，请删除 .venv 后重新运行本脚本
+        echo [FAIL] pip repair failed. Delete .venv and re-run this script.
         goto :end
     )
 )
 
-REM ---------- 5. 升级 pip 并安装依赖 ----------
-echo [setup] 升级 pip / setuptools / wheel...
+REM ---------- 5. Upgrade pip and install dependencies ----------
+echo [setup] Upgrading pip / setuptools / wheel...
 %VENV_PY% -m pip install --upgrade pip setuptools wheel >nul 2>&1
 
 if not exist "%SCRIPT_DIR%requirements.txt" (
-    echo [FAIL] 未找到 requirements.txt
+    echo [FAIL] requirements.txt not found
     goto :end
 )
-echo [setup] 安装后端依赖（Python %PY_VERSION% 兼容版）...
+echo [setup] Installing backend dependencies (Python %PY_VERSION% compatible)...
 %VENV_PY% -m pip install -r "%SCRIPT_DIR%requirements.txt"
 if errorlevel 1 (
-    echo [setup] 官方源失败，尝试清华镜像源...
+    echo [setup] Official index failed, trying Tsinghua mirror...
     %VENV_PY% -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r "%SCRIPT_DIR%requirements.txt"
     if errorlevel 1 (
-        echo [FAIL] 依赖安装失败，请检查网络后重试
+        echo [FAIL] Dependency install failed. Check network and retry.
         goto :end
     )
 )
 
-REM ---------- 6. 验证后端依赖 ----------
-echo [setup] 验证后端依赖...
+REM ---------- 6. Verify backend dependencies ----------
+echo [setup] Verifying backend dependencies...
 %VENV_PY% -c "import fastapi, uvicorn, requests; print('  fastapi', fastapi.__version__)"
 if errorlevel 1 (
-    echo [FAIL] 后端依赖验证失败
+    echo [FAIL] Backend dependency verification failed
     goto :end
 )
-echo [ OK  ] 后端依赖验证通过
+echo [ OK  ] Backend dependencies verified
 
-REM ---------- 7. 前端构建（检测 node） ----------
-echo [setup] 检测 node 环境...
+REM ---------- 7. Frontend build (detect node) ----------
+echo [setup] Checking node environment...
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] 未检测到 node，跳过前端构建。
-    echo [WARN] 将使用交付的 frontend_dist 构建产物（已含，开箱即用）。
+    echo [WARN] node not detected, skip frontend build.
+    echo [WARN] Will use delivered frontend_dist build artifact (included, ready to use).
 ) else (
     if exist "%SCRIPT_DIR%frontend\package.json" (
-        echo [ OK  ] 检测到 node，构建前端（需联网下载依赖，较慢）...
+        echo [ OK  ] node detected, building frontend (needs network for deps, slower)...
         pushd "%SCRIPT_DIR%frontend"
         call npm install >nul 2>&1
         call npm run build
         popd
         if exist "%SCRIPT_DIR%frontend_dist\index.html" (
-            echo [ OK  ] 前端构建产物已生成
+            echo [ OK  ] Frontend build artifact generated
         ) else (
-            echo [WARN] 前端构建未生成产物，将使用交付的 frontend_dist
+            echo [WARN] Frontend build produced no output, will use delivered frontend_dist
         )
     )
 )
 
-REM ---------- 8. 校验前端产物 ----------
+REM ---------- 8. Verify frontend artifact ----------
 if exist "%SCRIPT_DIR%frontend_dist\index.html" (
-    echo [ OK  ] 前端产物就绪: frontend_dist\index.html
+    echo [ OK  ] Frontend artifact ready: frontend_dist\index.html
 ) else (
-    echo [WARN] 未找到 frontend_dist 构建产物，请先构建前端或从交付包恢复
+    echo [WARN] frontend_dist build artifact not found. Build frontend or restore from delivered package.
 )
 
-REM ---------- 9. 完成 ----------
+REM ---------- 9. Done ----------
 echo.
 echo ==============================================
-echo   环境配置完成！
+echo   Environment setup complete!
 echo ==============================================
 echo.
-echo   启动应用：双击 operation.bat
-echo   浏览器访问：http://localhost:8000
-echo   局域网访问：http://本机局域网IP:8000（见 operation.bat 启动输出）
-echo.
-echo   若出现中文乱码，请在 Windows 设置中开启
-echo   "使用 Unicode UTF-8 提供全球语言支持"
+echo   Start app:    double-click operation.bat
+echo   Browser:      http://localhost:8000
+echo   LAN access:   http://<this-machine-LAN-IP>:8000 (see operation.bat startup output)
 echo.
 
 :end
