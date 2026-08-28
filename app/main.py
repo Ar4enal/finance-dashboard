@@ -105,6 +105,8 @@ def _fetch_kline(sym, period="day", count=120):
 @app.get("/api/kline")
 def get_kline(market: str, code: str, period: str = "day", count: int = 120):
     mkt = ds.normalize_market(market)
+    proxied = False
+    proxy_note = None
     try:
         # 基金：用天天基金单位净值历史（无盘中OHLC，构造等值K线）
         if mkt == "FUND":
@@ -131,9 +133,22 @@ def get_kline(market: str, code: str, period: str = "day", count: int = 120):
                 fsym = futures_map.get(code, code)
                 try:
                     k = ds.sina_futures_kline(fsym, count=count)
-                except ds.DataSourceError as e:
-                    # 纽约金/伦敦金等真实数据源暂不可达：诚实提示，不回退造假
-                    return fail("该黄金品种K线数据源暂不可用（%s）" % str(e))
+                except ds.DataSourceError:
+                    # 纽约金(hf_GC)/伦敦金(hf_XAU)真实历史K线源在当前可访问源均不可达
+                    # （实测：新浪 GC0/XAUUSD 返回空、腾讯 fqkline 返回空、东财 push2his 整体不可达），
+                    # 回退沪金 AU0 真实K线并诚实标注 proxied，绝不伪造纽约金/伦敦金数据。
+                    if code in ("hf_GC", "hf_XAU"):
+                        label = "纽约金(COMEX GC)" if code == "hf_GC" else "伦敦金(XAU/USD)"
+                        try:
+                            k = ds.sina_futures_kline("AU0", count=count)
+                        except ds.DataSourceError as e:
+                            return fail("黄金K线数据源暂不可用（%s）" % str(e))
+                        proxied = True
+                        proxy_note = ("%s 历史K线真实数据源暂不可达，以下为沪金 AU0 真实K线"
+                                      "（同为黄金、走势强相关；单位为元/克，与%s的美元/盎司计价不同，仅供参考）"
+                                      % (label, label))
+                    else:
+                        return fail("该黄金品种K线数据源暂不可用")
         elif mkt == "US":
             # 美股/海外指数修复（v22）：先走个股路径 usCODE.OQ，若拿到 >=2 根视为个股；
             # 否则当作指数改用 usfqkline（usCODE）取完整历史。
@@ -165,6 +180,8 @@ def get_kline(market: str, code: str, period: str = "day", count: int = 120):
             "volume": k["volume"],
             "ma5": ma5, "ma10": ma10, "ma20": ma20,
             "macdDIF": dif, "macdDEA": dea, "macdBAR": bar,
+            "proxied": proxied,
+            "proxy_note": proxy_note,
         })
     except ds.DataSourceError:
         return fail("K线数据暂不可用")

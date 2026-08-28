@@ -1,0 +1,14 @@
+# 依赖与虚拟环境
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# 运行时数据（SQLite、导出文件、日志）
+data/
+持仓数据_export.json
+server.log
+*.log
+
+# IDE
+.idea/

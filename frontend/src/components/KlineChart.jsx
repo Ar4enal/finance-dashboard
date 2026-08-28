@@ -18,7 +18,7 @@ export default function KlineChart({ market, code }) {
   if (error) return <div className="empty" style={{ padding: 30, textAlign: 'center' }}>📭 {error}</div>
   if (!kdata) return <div className="loading">加载K线中...</div>
 
-  const { dates, ohlc, volume, ma5, ma10, ma20, macdDIF, macdDEA, macdBAR } = kdata
+  const { dates, ohlc, volume, ma5, ma10, ma20, macdDIF, macdDEA, macdBAR, proxied, proxy_note } = kdata
 
   const option = {
     animation: false,
@@ -77,5 +77,12 @@ export default function KlineChart({ market, code }) {
     ],
   }
 
-  return <EChart option={option} className="chart-md" style={{ height: 660 }} />
+  return (
+    <>
+      {proxied && proxy_note && (
+        <div className="kline-proxy-note">⚠️ {proxy_note}</div>
+      )}
+      <EChart option={option} className="chart-md" style={{ height: 660 }} />
+    </>
+  )
 }
