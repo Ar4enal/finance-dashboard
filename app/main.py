@@ -704,7 +704,7 @@ def portfolio_summary():
     total_holding_pct = round(total_holding_pnl / total_cost * 100, 2) if total_cost else 0
     # 每日净值快照（幂等）：当天首次计算组合时写入，供净值曲线/最大回撤使用。
     # 快照口径与组合汇总一致（含实物黄金按成本兜底），随使用自然积累。
-    db.ensure_snapshot_today(round(total_mv, 2), round(total_cost, 2))
+    db.ensure_snapshot_today(round(total_mv, 2), round(total_cost, 2), round(total_cum_pnl, 2))
     # 持仓级每日快照（幂等）：同步记录每个持仓当天市值，供收益分析按持仓拆分日/月/年收益。
     pos_snap_items = []
     for p in data:
@@ -714,6 +714,20 @@ def portfolio_summary():
         else:
             pos_snap_items.append((p.get("market"), p.get("code"), p.get("market_value")))
     db.ensure_position_snapshots_today(pos_snap_items)
+    # 收益口径锚定当日快照：从快照读回（冻结当日值），保证刷新稳定且基于当前持仓。
+    # 当天首次/重算时快照已写入当前持仓收益；之后保持冻结，不再随实时行情跳动。
+    snap = db.get_snapshot_today()
+    if snap:
+        smv = snap.get("total_market_value") or 0
+        scost = snap.get("total_cost") or 0
+        scum = snap.get("total_cum_pnl")
+        if scum is None:
+            scum = smv - scost
+        total_mv = smv
+        total_cost = scost
+        total_holding_pnl = round(smv - scost, 2)
+        total_cum_pnl = round(scum, 2)
+        total_holding_pct = round(total_holding_pnl / total_cost * 100, 2) if total_cost else 0
     return ok({
         "totalMarketValue": round(total_mv, 2),
         "totalCost": round(total_cost, 2),
@@ -1224,29 +1238,31 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
 @app.get("/api/portfolio/pnl-series")
 def pnl_series(days: int = 30, kind: str = "holding"):
     """近 N 天每日收益序列（用于总览卡片点击查看详情的折线图）。
-    kind: holding（当前持仓收益走势）= 每日 总市值-总成本；cum（累计收益走势）= 每日 累计收益（含已实现）。
+    kind: holding（当前持仓收益走势）= 每日 总市值-总成本；cum（累计收益走势）= 每日 累计收益（含已实现，取自快照 total_cum_pnl）。
     返回 {dates, daily_pnl, cumulative_pnl, latest_date}；最右为当前日期，可向左滑动至第一条记录。
+    历史点来自每日快照（基于当日当前持仓计算），最右（今日）与总览卡片口径一致。
     """
     snaps = db.get_snapshots()
     if not snaps:
         return ok({"dates": [], "daily_pnl": [], "cumulative_pnl": [], "latest_date": ""})
     recent = snaps[-days:] if len(snaps) >= days else snaps
-    dates, daily, cum = [], [], []
-    running = 0.0
-    for i in range(1, len(recent)):
-        prev, cur = recent[i - 1], recent[i]
-        day_combo = round(cur["total_market_value"] - prev["total_market_value"], 2)
-        daily.append(day_combo)
-        running += day_combo
-        dates.append(cur["snap_date"])
+    dates = [s["snap_date"] for s in recent]
+    # 每个快照对应的「当日收益」：holding=市值-成本；cum=累计收益（含已实现），旧快照缺列时回退市值-成本
+    vals = []
+    for s in recent:
+        mv = s.get("total_market_value") or 0
+        cost = s.get("total_cost") or 0
         if kind == "holding":
-            cum.append(round(cur["total_market_value"] - cur["total_cost"], 2))
+            vals.append(round(mv - cost, 2))
         else:
-            cum.append(round(running, 2))
+            cum = s.get("total_cum_pnl")
+            vals.append(round(cum if cum is not None else (mv - cost), 2))
+    # 每日收益 = 相邻快照之差（走势形状正确，末点变化反映当日截至当前的收益变动）
+    daily = [round(vals[i] - vals[i - 1], 2) for i in range(1, len(vals))]
     return ok({
         "dates": dates,
         "daily_pnl": daily,
-        "cumulative_pnl": cum,
+        "cumulative_pnl": vals,
         "latest_date": dates[-1] if dates else "",
     })# =========================================================
 @app.get("/api/reports/export")

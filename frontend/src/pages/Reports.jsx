@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { api } from '../api.js'
 import { useKline } from '../kline.jsx'
 
@@ -9,6 +9,13 @@ const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 export default function Reports() {
   const [positions, setPositions] = useState([])
   const [txns, setTxns] = useState([])
+  // 交易流水按 市场|代码 映射持仓名称
+  const posNameMap = useMemo(() => {
+    const m = {}
+    for (const p of positions) m[p.market + '|' + p.code] = p.name || p.code
+    return m
+  }, [positions])
+  const txnName = (t) => posNameMap[t.market + '|' + t.code] || t.code
   const { openKline } = useKline()
 
   const load = () => {
@@ -70,11 +77,11 @@ export default function Reports() {
       <div className="card">
         <div className="card-title">交易流水</div>
         <table>
-          <thead><tr><th>日期</th><th>代码</th><th>市场</th><th>方向</th><th className="num">数量</th><th className="num">价格</th><th className="num">金额</th></tr></thead>
+          <thead><tr><th>日期</th><th>代码</th><th>名称</th><th>市场</th><th>方向</th><th className="num">数量</th><th className="num">价格</th><th className="num">金额</th></tr></thead>
           <tbody>
             {txns.map(t => (
               <tr key={t.id}>
-                <td>{t.trans_date}</td><td>{t.code}</td>
+                <td>{t.trans_date}</td><td>{t.code}</td><td>{txnName(t)}</td>
                 <td><span className="badge badge-a">{t.market}</span></td>
                 <td><span className={`badge ${t.side === 'BUY' ? 'badge-a' : 'badge-u'}`}>{t.side === 'BUY' ? '买入' : '卖出'}</span></td>
                 <td className="num">{fmt(t.quantity)}</td>

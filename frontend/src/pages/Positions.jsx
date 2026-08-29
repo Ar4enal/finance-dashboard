@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import ProfitDisplay from '../components/ProfitDisplay.jsx'
 import { api } from '../api.js'
 import { useInputHistory, clearHistory, loadHistory } from '../history.js'
@@ -44,6 +44,13 @@ const pfmt = (n, market) => (n == null ? '—' : fmt(n, market === 'FUND' ? 4 : 
 export default function Positions() {
   const [positions, setPositions] = useState([])
   const [txns, setTxns] = useState([])
+  // 交易记录按 市场|代码 映射持仓名称（删除持仓会连带删除其全部交易记录，故映射可靠）
+  const posNameMap = useMemo(() => {
+    const m = {}
+    for (const p of positions) m[p.market + '|' + p.code] = p.name || p.code
+    return m
+  }, [positions])
+  const txnName = (t) => posNameMap[t.market + '|' + t.code] || t.code
   const [showForm, setShowForm] = useState(false)
   const [editTxn, setEditTxn] = useState(null)  // 正在编辑的交易
   const [form, setForm] = useState({ market: 'A股', code: '', side: 'BUY', quantity: '', price: '', fee: 0, trans_date: new Date().toISOString().split('T')[0], note: '', fund_time: 'before' })
@@ -84,6 +91,14 @@ export default function Positions() {
   const [addPosResult, setAddPosResult] = useState(null)  // 后端返回的计算结果
   const [addPosLoading, setAddPosLoading] = useState(false)
   const { openKline } = useKline()
+  // 从持仓打开 K 线时，把该产品录入的买卖交易记录作为 markers 传入，
+  // K 线顶部会用竖直虚线 + 文字标注买入（橙）/ 卖出（蓝）。
+  const openKlineWithMarkers = (p) => {
+    const mk = (txns || [])
+      .filter(t => t.market === p.market && t.code === p.code && t.trans_date)
+      .map(t => ({ date: t.trans_date, side: t.side }))
+    openKline(p.market, p.code, p.name, mk)
+  }
   // 批量导入：addPosMode='single'（单条）| 'batch'（批量）；batchText 为多行文本；batchResults 为逐条结果
   const [addPosMode, setAddPosMode] = useState('single')
   const [addPosBatchMarket, setAddPosBatchMarket] = useState('A股')
@@ -456,7 +471,7 @@ export default function Positions() {
       <div className="pos-grid">
         {pagePositions.map(p => (
           <div key={p.code + p.market} className="pos-card clickable" style={{ cursor: 'pointer' }}
-            title="点击查看 K 线行情" onClick={() => openKline(p.market, p.code, p.name)}>
+            title="点击查看 K 线行情" onClick={() => openKlineWithMarkers(p)}>
             <div className="top">
               {pinnedSet[p.market + ':' + p.code] && <span style={{ marginRight: 4 }} title="已置顶">📌</span>}
               <span className="name">{p.name || p.code}</span><span className="code">{p.code} · {p.market}</span>
@@ -496,7 +511,7 @@ export default function Positions() {
           <tbody>
             {pagePositions.map(p => (
               <tr key={p.code + p.market}>
-                <td style={{ cursor: 'pointer' }} onClick={() => openKline(p.market, p.code, p.name)}
+                <td style={{ cursor: 'pointer' }} onClick={() => openKlineWithMarkers(p)}
                   title="点击查看 K 线行情">
                   {pinnedSet[p.market + ':' + p.code] && <span style={{ marginRight: 6 }} title="已置顶">📌</span>}
                   {p.name || p.code}
@@ -682,11 +697,11 @@ export default function Positions() {
       <div className="card">
         <div className="card-title">交易记录</div>
         <table>
-          <thead><tr><th>日期</th><th>代码</th><th>市场</th><th>方向</th><th className="num">数量</th><th className="num">价格</th><th className="num">手续费</th><th>操作</th></tr></thead>
+          <thead><tr><th>日期</th><th>代码</th><th>名称</th><th>市场</th><th>方向</th><th className="num">数量</th><th className="num">价格</th><th className="num">手续费</th><th>操作</th></tr></thead>
           <tbody>
             {txns.map(t => (
               <tr key={t.id}>
-                <td>{t.trans_date}</td><td>{t.code}</td>
+                <td>{t.trans_date}</td><td>{t.code}</td><td>{txnName(t)}</td>
                 <td><span className="badge badge-a">{t.market}</span></td>
                 <td><span className={`badge ${t.side === 'BUY' ? 'badge-a' : 'badge-u'}`}>{t.side === 'BUY' ? '买入' : '卖出'}</span></td>
                 <td className="num">{fmt(t.quantity)}</td>

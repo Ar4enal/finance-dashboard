@@ -57,6 +57,12 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # 兼容旧库：已存在的 snapshots 表补列 total_cum_pnl（每日累计收益含已实现，
+    # 供总览卡片与近一个月收益折线图使用；旧快照该列为 NULL，由 ensure_snapshot_today 重算覆盖）
+    try:
+        cur.execute("ALTER TABLE snapshots ADD COLUMN total_cum_pnl REAL")
+    except Exception:
+        pass
     # 持仓级每日快照（收益分析：每个持仓按日市值，用于计算日/月/年/累计收益明细）
     cur.execute("""
         CREATE TABLE IF NOT EXISTS position_snapshots (
@@ -369,20 +375,46 @@ def save_snapshot(snap_date, market_value, cost, cash=0):
         conn.close()
 
 
-def ensure_snapshot_today(market_value, cost, cash=0):
+def ensure_snapshot_today(market_value, cost, cum_pnl=None, cash=0):
     """确保今天已有一条净值快照（幂等）。
-    组合分析/持仓页每次计算组合时调用：当天首次调用写入，之后不再覆盖，
-    保证净值曲线按「每日一条」积累，不会被盘中多次访问刷成多条或覆盖。"""
+    组合分析/持仓页每次计算组合时调用：
+    - 当天首次调用写入（含累计收益 total_cum_pnl）；
+    - 若当天已存在但为旧版快照（total_cum_pnl 为 NULL，即修复前代码写入），
+      则按当前持仓重算并覆盖一次，使收益口径回归「基于当前持仓」；
+    - 其余情况保持冻结，保证总览收益锚定当日快照、不再随实时行情跳动。
+    """
     snap_date = today_str()
     conn = _connect()
     try:
-        row = conn.execute("SELECT id FROM snapshots WHERE snap_date=?", (snap_date,)).fetchone()
+        row = conn.execute(
+            "SELECT id, total_cum_pnl FROM snapshots WHERE snap_date=?", (snap_date,)
+        ).fetchone()
         if not row:
             conn.execute(
-                "INSERT INTO snapshots(snap_date,total_market_value,total_cost,cash)"
-                " VALUES(?,?,?,?)",
-                (snap_date, market_value, cost, cash))
+                "INSERT INTO snapshots(snap_date,total_market_value,total_cost,total_cum_pnl,cash)"
+                " VALUES(?,?,?,?,?)",
+                (snap_date, market_value, cost, cum_pnl, cash))
             conn.commit()
+        elif row["total_cum_pnl"] is None:
+            # 旧版快照缺累计收益列，用当前持仓重算覆盖一次，之后冻结
+            conn.execute(
+                "UPDATE snapshots SET total_market_value=?, total_cost=?, total_cum_pnl=?, cash=?"
+                " WHERE id=?",
+                (market_value, cost, cum_pnl, cash, row["id"]))
+            conn.commit()
+        # 否则：当天快照已存在且为完整新版 → 保持冻结，保证稳定
+    finally:
+        conn.close()
+
+
+def get_snapshot_today():
+    """返回今天的净值快照（dict），不存在返回 None。"""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM snapshots WHERE snap_date=? ORDER BY id DESC LIMIT 1", (today_str(),)
+        ).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 
@@ -1022,10 +1054,10 @@ def import_all_data(payload):
         # 4) 净值快照
         for s in payload.get("snapshots", []):
             cur.execute(
-                "INSERT OR REPLACE INTO snapshots(snap_date,total_market_value,total_cost,cash,created_at)"
-                " VALUES(?,?,?,?,?)",
+                "INSERT OR REPLACE INTO snapshots(snap_date,total_market_value,total_cost,total_cum_pnl,cash,created_at)"
+                " VALUES(?,?,?,?,?,?)",
                 (s.get("snap_date", ""), s.get("total_market_value", 0),
-                 s.get("total_cost", 0), s.get("cash", 0),
+                 s.get("total_cost", 0), s.get("total_cum_pnl", 0), s.get("cash", 0),
                  s.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             stat["snapshots"] += 1
 

@@ -8,6 +8,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 PID_FILE="$SCRIPT_DIR/.server.pid"
 LOG_FILE="$SCRIPT_DIR/.server.log"
 PORT="${2:-8000}"
@@ -61,7 +62,7 @@ do_start() {
     return 1
   fi
   echo "[start] 正在启动金融工作台（监听 $HOST:$PORT）"
-  nohup "$SCRIPT_DIR/.venv/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT" --app-dir "$SCRIPT_DIR" >"$LOG_FILE" 2>&1 &
+  nohup "$SCRIPT_DIR/.venv/bin/uvicorn" app.main:app --host "$HOST" --port "$PORT" --app-dir "$SCRIPT_DIR" --log-config "$SCRIPT_DIR/logging_config.json" >>"$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   sleep 1
   if is_running; then
