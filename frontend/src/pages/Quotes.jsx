@@ -41,6 +41,45 @@ const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
 
+// v31：指数卡片迷你分时小图（SVG polyline，涨红跌绿按最新价 vs 昨收）
+// 数据来自 /api/kline/intraday/batch（腾讯当日实时 / 东财最近交易日 / 本地跟踪文件）
+function IndexSpark({ spark }) {
+  const UP = '#f85149'
+  const DOWN = '#3fb950'
+  const MUTED = '#8b949e'
+  const { available, price, prev_close, trade_date, source, note } = spark || {}
+  const n = (price || []).length
+  const w = 100, h = 30, pad = 2
+  if (!available || !n) {
+    const tip = (note || '分时数据暂不可用') + (trade_date ? '（数据日期 ' + trade_date + '）' : '')
+    return (
+      <div className="idx-spark" title={tip} style={{ marginTop: 6, height: h, display: 'flex', alignItems: 'center', fontSize: 10, color: MUTED }}>
+        <span style={{ border: '1px dashed rgba(139,148,158,.5)', borderRadius: 4, padding: '1px 8px', opacity: .8 }}>分时·暂无（每交易日自动记录）</span>
+      </div>
+    )
+  }
+  const pc = (prev_close != null && prev_close > 0) ? prev_close : price[0]
+  const last = price[n - 1]
+  const color = last >= pc ? UP : DOWN
+  const min = Math.min(...price)
+  const max = Math.max(...price)
+  const span = (max - min) || Math.abs(max) * 0.001 || 1
+  const pts = price.map((v, i) => {
+    const x = n === 1 ? w / 2 : (i / (n - 1)) * w
+    const y = pad + (1 - (v - min) / span) * (h - pad * 2)
+    return x.toFixed(2) + ',' + y.toFixed(2)
+  }).join(' ')
+  const dateTip = (trade_date ? '数据日期 ' + trade_date + '；' : '') +
+    (source === 'tencent' ? '当日实时（腾讯）' : source === 'eastmoney' ? '最近交易日（东方财富）' : source === 'local' ? '本地跟踪记录（每分钟采样）' : '行情源')
+  return (
+    <div className="idx-spark" title={'分时小图：' + dateTip} style={{ marginTop: 6, opacity: .95 }}>
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: '100%', height: h, display: 'block' }}>
+        <polyline points={pts} fill="none" stroke={color} strokeWidth="1.2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      </svg>
+    </div>
+  )
+}
+
 // v23：自选基金/标的按日涨跌幅排序（可调升/降），行情不可用（pct 缺失）的沉底（按 -Infinity 处理）
 const sortByPct = (arr, dir = 'desc') => (arr || []).slice().sort((a, b) => {
   const pa = a && a.pct != null ? Number(a.pct) : Number.NEGATIVE_INFINITY
@@ -96,6 +135,8 @@ export default function Quotes() {
   const [idxForm, setIdxForm] = useState({ name: '', market: 'A', code: '' })
   // A股板块资金流向（当天前十流入/流出）
   const [sector, setSector] = useState(null)
+  // v31：指数卡片迷你分时小图数据（key = `market:code`）
+  const [sparkMap, setSparkMap] = useState({})
 
   const fetchIndex = useCallback(async () => {
     let list = []
@@ -110,6 +151,15 @@ export default function Quotes() {
       setIndexQuotes(map)
     } catch {}
   }, [])
+
+  // v31：拉取指数卡片迷你分时（轻量批量；后端 30s 缓存，60s 轮询足够）
+  const fetchSpark = useCallback(async () => {
+    if (!indices.length) { setSparkMap({}); return }
+    try {
+      const data = await api.intradayBatch(indices.map(i => `${i.market}:${i.code}`).join(','))
+      setSparkMap(data || {})
+    } catch {}
+  }, [indices])
 
   const fetchSector = useCallback(async () => {
     try { setSector(await api.sectorFlow()) } catch {}
@@ -200,6 +250,13 @@ export default function Quotes() {
     const t = setInterval(() => { fetchIndex(); fetchWatchlist(); fetchGold(); fetchPenetrations(); fetchSector() }, refreshSec * 1000)
     return () => clearInterval(t)
   }, [refreshSec, fetchIndex, fetchWatchlist, fetchGold, fetchPenetrations, fetchSector])
+
+  // v31：指数卡片迷你分时：indices 变化立即拉一次，之后每 60s 轮询
+  useEffect(() => {
+    fetchSpark()
+    const t = setInterval(fetchSpark, 60000)
+    return () => clearInterval(t)
+  }, [fetchSpark, indices])
 
   const openFund = async (code) => {
     try {
@@ -342,6 +399,27 @@ export default function Quotes() {
   const isAnomaly = (it) => it && it.pct != null && (it.pct > anomalyPct || it.pct < -anomalyPct)
   const anomalies = [...funds, ...watchlist].filter(isAnomaly)
 
+  // v31：当日收益总和 = 本模块内「有持仓」产品的预估日收益合计（预估日收益 = 日涨跌幅 × 持仓市值）
+  // 自选基金模块（含自动同步的持仓基金）与 自选标的模块 各自计算并展示在异动阈值左侧
+  const pnlSumOf = (rows) => (rows || []).reduce((acc, it) => {
+    const v = valOf(it, 'pnl')
+    return v == null ? acc : acc + v
+  }, 0)
+  const fundPnlSum = pnlSumOf(funds)
+  const watchPnlSum = pnlSumOf(watchlist)
+  // 收益总和展示块（正收益红 up、负收益绿 down；无任何持仓收益时置灰）
+  const pnlBadge = (label, sum) => {
+    const has = sum != null && Math.abs(sum) > 1e-9
+    const clsSum = has ? (sum > 0 ? 'up' : 'down') : ''
+    return (
+      <span className="pnl-sum" title="当日收益总和 = Σ（本模块中持仓产品 预估日收益），预估日收益 = 日涨跌幅 × 持仓市值"
+        style={{ marginRight: 14, fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
+        {label}
+        <span className={clsSum} style={{ fontVariantNumeric: 'tabular-nums' }}>{has ? '¥' + sign(sum) : '¥0.00'}</span>
+      </span>
+    )
+  }
+
   return (
     <section className="page active">
       <div className="page-head">
@@ -408,7 +486,7 @@ export default function Quotes() {
             const first = isFirst(idx)
             const last = isLast(idx)
             return (
-              <div key={idx.code + idx.market} className="index-card" onClick={() => openKline(idx.market, idx.code, idx.name)}>
+              <div key={idx.code + idx.market} className="index-card" onClick={() => openKline(idx.market, idx.code, idx.name, undefined, { preferMinute: true })}>
                 <div className="ic-name">
                   <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, marginRight: 6 }}>
                     <span className={'idx-mv' + (first ? ' disabled' : '')} title={first ? '已是最顶部' : '上移'} onClick={(e) => { e.stopPropagation(); if (!first) moveIdx(idx, 'up') }}>▲</span>
@@ -422,6 +500,7 @@ export default function Quotes() {
                   : <>
                       <div className={`ic-value ${cls(q?.chg)}`}>{fmt(q?.price)}</div>
                       <div className={`ic-pct ${cls(q?.chg)}`}>{sign(q?.chg)} ({sign(q?.pct)}%)</div>
+                      <IndexSpark spark={sparkMap[`${idx.market}:${idx.code}`] || sparkMap[`${idx.market}:${idx.code.toLowerCase()}`]} />
                     </>}
                 <div className="ic-mark">{idx.code} · 点击看K线</div>
               </div>
@@ -524,6 +603,7 @@ export default function Quotes() {
           <span className="index-title">💼 自选基金</span>
           <span style={{ color: 'var(--muted)', fontSize: 12 }}>点击查看详情</span>
           <span style={{ flex: 1 }} />
+          {pnlBadge('基金当日收益', fundPnlSum)}
           <span className="anomaly-set">
             异动阈值
             <select className="anomaly-sel" value={anomalyPct} onChange={e => setAnomaly(Number(e.target.value))} title="涨跌幅异动跟踪阈值（1%~10%，同时作用于自选标的）">
@@ -579,7 +659,9 @@ export default function Quotes() {
       <div className="card">
         <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           自选标的
-          <span className="anomaly-set" style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 400 }}>
+          <span style={{ flex: 1 }} />
+          {pnlBadge('标的当日收益', watchPnlSum)}
+          <span className="anomaly-set" style={{ fontSize: 12, fontWeight: 400 }}>
             异动阈值
             <select className="anomaly-sel" value={anomalyPct} onChange={e => setAnomaly(Number(e.target.value))} title="涨跌幅异动跟踪阈值（1%~10%，同时作用于自选基金）">
               {[1,2,3,4,5,6,7,8,9,10].map(n => <option key={n} value={n}>{n}%</option>)}

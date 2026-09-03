@@ -1,22 +1,29 @@
 import React, { useEffect, useRef } from 'react'
 import * as echarts from 'echarts'
 
-export default function EChart({ option, className = 'chart', style, onEvents }) {
+export default function EChart({ option, className = 'chart', style, onEvents, onChartReady }) {
   const ref = useRef(null)
   const chartRef = useRef(null)
   // 用 ref 持有最新 onEvents，避免重绑时闭包拿到旧值
   const eventsRef = useRef(onEvents)
   eventsRef.current = onEvents
+  // 用 ref 持有最新 onChartReady，避免清理时闭包拿到旧值
+  const readyRef = useRef(onChartReady)
+  readyRef.current = onChartReady
 
   useEffect(() => {
     if (!ref.current) return
     const chart = echarts.init(ref.current)
     chartRef.current = chart
+    // 暴露实例给调用方（如 K 线需按图例选中态动态更新图标）
+    if (readyRef.current) readyRef.current(chart)
     const onResize = () => chart.resize()
     window.addEventListener('resize', onResize)
     return () => {
       window.removeEventListener('resize', onResize)
       chart.dispose()
+      chartRef.current = null
+      if (readyRef.current) readyRef.current(null)
     }
   }, [])
 

@@ -20,6 +20,11 @@ EASTMONEY_HEADERS = {
     "Referer": "https://fundf10.eastmoney.com/",
 }
 
+# 腾讯行情接口域名（v31 实测：web.ifzq.gtimg.cn 会被 WAF 拦成 501；
+# 同源代理域名 proxy.finance.qq.com 稳定可用，且原生支持
+# fqkline day/week/month/year 全周期与 kline/mkline 分钟K、minute/query 当日分时）。
+TENCENT_IFZQ = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app"
+
 _session = requests.Session()
 _session.headers.update(SINA_HEADERS)
 
@@ -277,7 +282,12 @@ def sina_quotes(symbols):
             price = _float(f[6]) if len(f) > 6 else 0
             chg = _float(f[7]) if len(f) > 7 else 0
             pct = _float(f[8]) if len(f) > 8 else 0
-            result[sym] = {"name": name, "price": price, "chg": chg, "pct": pct, "prev": _float(f[3]) if len(f) > 3 else 0}
+            # 源侧日期/时间（f[17]=日期 2026/09/03，f[18]=时间 HH:MM）供新鲜度判断
+            src_date = f[17].strip() if len(f) > 17 else ""
+            src_time = f[18].strip() if len(f) > 18 else ""
+            result[sym] = {"name": name, "price": price, "chg": chg, "pct": pct,
+                           "prev": _float(f[3]) if len(f) > 3 else 0,
+                           "src_date": src_date, "src_time": src_time}
         elif sym.startswith("fu_"):
             # 基金: 名称,时间,现价(净值),昨净值,累计净值,涨跌额,涨跌幅,日期
             name = f[0]
@@ -312,7 +322,11 @@ def sina_quotes(symbols):
             price = _float(f[3]) if len(f) > 3 else 0
             chg = round(price - prev, 3)
             pct = round(chg / prev * 100, 2) if prev else 0
-            result[sym] = {"name": name, "price": price, "chg": chg, "pct": pct, "prev": prev}
+            # 源侧日期/时间（f[30]=日期 YYYY-MM-DD，f[31]=时间 HH:MM:SS）
+            src_date = f[30].strip() if len(f) > 30 else ""
+            src_time = f[31].strip() if len(f) > 31 else ""
+            result[sym] = {"name": name, "price": price, "chg": chg, "pct": pct,
+                           "prev": prev, "src_date": src_date, "src_time": src_time}
     return result
 
 
@@ -398,10 +412,22 @@ def gold_kline_symbol():
 # ---------------------------------------------------------------
 def tencent_kline(symbol, period="day", count=120):
     """
-    腾讯K线，返回统一格式:
-    {"dates": [...], "ohlc": [[open,close,low,high],...], "volume": [...]}
+    腾讯K线（fqkline，前复权），支持周期 day/week/month/year。
+    symbol: sh600519 / hk00700 / usAAPL.OQ / sh000001。
+    返回统一格式: {"dates","ohlc":[[open,close,low,high],...],"volume"}。
+
+    关键实现说明（v31 实测确认）：
+    1. 数据键名：个股前复权返回 qfq{period}（qfqday/qfqweek/qfqmonth），
+       指数/港股等返回 {period}（day/week/month），year 周期返回 "year"。
+       解析统一取 qfq{period} 优先、{period} 兜底。
+    2. 腾讯行列序为 [日期, 开, 收, 高, 低, 量]（已与新浪逐日比对确认），
+       输出前把高低位调整成 ECharts candlestick 所需 [开, 收, 最低, 最高]，
+       与新浪口径一致（修正历史遗留的高低错位风险）。
+    3. year 周期腾讯只返回「当年」1 根，无历史年度序列；
+       历史年K请用 month 数据经 aggregate_kline 聚合（真实数据加工）。
     """
-    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,%s,,,%d,qfq" % (symbol, period, count)
+    url = ("%s/fqkline/get?param=%s,%s,,,%d,qfq"
+           % (TENCENT_IFZQ, symbol, period, count))
     text = _get(url, headers=TENCENT_HEADERS, decode="utf-8")
     import json
     try:
@@ -409,8 +435,9 @@ def tencent_kline(symbol, period="day", count=120):
     except Exception:
         raise DataSourceError("K线JSON解析失败")
     node = data.get("data", {}).get(symbol, {})
-    # 优先取 qfqday（前复权），否则 day
-    rows = node.get("qfqday") or node.get("day") or []
+    if not isinstance(node, dict):
+        raise DataSourceError("K线数据格式异常")
+    rows = node.get("qfq" + period) or node.get(period) or []
     if not isinstance(rows, list):
         raise DataSourceError("K线数据格式异常")
     dates, ohlc, volume = [], [], []
@@ -419,7 +446,8 @@ def tencent_kline(symbol, period="day", count=120):
             continue
         try:
             dates.append(row[0])
-            ohlc.append([float(row[1]), float(row[2]), float(row[3]), float(row[4])])
+            # 腾讯列序 [date, open, close, high, low, volume] → 统一 [o, c, l, h]
+            ohlc.append([float(row[1]), float(row[2]), float(row[4]), float(row[3])])
             volume.append(float(row[5]))
         except (ValueError, TypeError):
             continue
@@ -431,12 +459,13 @@ def tencent_kline(symbol, period="day", count=120):
 # 腾讯 usfqkline 接口支持的美股指数（纳斯达克/标普/道琼斯有完整K线；费城半导体SOX无数据）
 def tencent_us_index_kline(symbol, period="day", count=120):
     """
-    腾讯美股指数K线（usfqkline 接口）。
+    腾讯美股指数K线（usfqkline 接口），支持 day/week/month（前复权）。
     symbol: usIXIC / usINX / usDJI（不带 .OQ）。
-    返回统一格式 {"dates","ohlc","volume"}。无数据时返回空列表。
+    返回统一格式 {"dates","ohlc","volume"}。无数据时抛 DataSourceError。
+    注意：usfqkline 仅返回 qfq{period} 键；请求 bfq 参数会返回空。
     """
-    url = ("https://web.ifzq.gtimg.cn/appstock/app/usfqkline/get?param=%s,%s,,,%d,qfq"
-           % (symbol, period, count))
+    url = ("%s/usfqkline/get?param=%s,%s,,,%d,qfq"
+           % (TENCENT_IFZQ, symbol, period, count))
     text = _get(url, headers=TENCENT_HEADERS, decode="utf-8")
     import json
     try:
@@ -444,7 +473,9 @@ def tencent_us_index_kline(symbol, period="day", count=120):
     except Exception:
         raise DataSourceError("美股指数K线JSON解析失败")
     node = data.get("data", {}).get(symbol, {})
-    rows = node.get("qfqday") or node.get("day") or []
+    if not isinstance(node, dict):
+        raise DataSourceError("美股指数K线数据格式异常")
+    rows = node.get("qfq" + period) or node.get(period) or []
     if not isinstance(rows, list):
         raise DataSourceError("美股指数K线数据格式异常")
     dates, ohlc, volume = [], [], []
@@ -453,13 +484,158 @@ def tencent_us_index_kline(symbol, period="day", count=120):
             continue
         try:
             dates.append(row[0])
-            ohlc.append([float(row[1]), float(row[2]), float(row[3]), float(row[4])])
+            # 腾讯列序 [date, open, close, high, low, volume] → 统一 [o, c, l, h]
+            ohlc.append([float(row[1]), float(row[2]), float(row[4]), float(row[3])])
             volume.append(float(row[5]))
         except (ValueError, TypeError):
             continue
     if not dates:
         raise DataSourceError("美股指数K线数据为空")
     return {"dates": dates, "ohlc": ohlc, "volume": volume}
+
+
+# ---------------------------------------------------------------
+# 腾讯分钟K线 + 当日分时（v31 新增）
+# ---------------------------------------------------------------
+def tencent_mkline(symbol, freq="m5", count=240):
+    """
+    腾讯分钟K线（kline/mkline）。freq: m1/m5/m15/m30/m60。
+    symbol: sh600519 / sz000001 / sh000001。
+    实测仅 A股股票与A股指数返回数据；港股/美股/（腾讯源）可转债返回空。
+    行: [YYYYMMDDHHMM, open, close, high, low, volume, ...] → 统一格式。
+    无数据时抛 DataSourceError（由调用方决定提示口径）。
+    """
+    url = ("%s/kline/mkline?param=%s,%s,,,%d"
+           % (TENCENT_IFZQ, symbol, freq, count))
+    text = _get(url, headers=TENCENT_HEADERS, decode="utf-8")
+    import json
+    try:
+        data = json.loads(text)
+    except Exception:
+        raise DataSourceError("分钟K线JSON解析失败")
+    node = data.get("data", {}).get(symbol, {})
+    if not isinstance(node, dict):
+        raise DataSourceError("分钟K线数据格式异常")
+    rows = node.get(freq) or []
+    if not isinstance(rows, list) or not rows:
+        raise DataSourceError("分钟K线数据为空")
+    dates, ohlc, volume = [], [], []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        try:
+            dt = str(row[0])
+            # YYYYMMDDHHMM → YYYY-MM-DD HH:MM（展示与对齐用）
+            dates.append("%s-%s-%s %s:%s" % (dt[0:4], dt[4:6], dt[6:8], dt[8:10], dt[10:12]))
+            # 腾讯列序 [datetime, open, close, high, low, volume] → [o, c, l, h]
+            ohlc.append([float(row[1]), float(row[2]), float(row[4]), float(row[3])])
+            volume.append(float(row[5]))
+        except (ValueError, TypeError, IndexError):
+            continue
+    if not dates:
+        raise DataSourceError("分钟K线数据为空")
+    return {"dates": dates, "ohlc": ohlc, "volume": volume}
+
+
+def tencent_minute_today(symbol):
+    """
+    腾讯当日分时（minute/query，5分钟粒度）。symbol: sh600519 / hk00700。
+    实测：A股个股/指数、港股有数据；美股非交易时段返回空。
+    返回 {"times","price","volume","amount","prev_close"}；
+    volume 单位：A股为手、港股为股；amount 为元。无数据抛 DataSourceError。
+    avg_price（均价）需调用方按市场把 A股 volume 换算成股后累计计算。
+    """
+    url = "%s/minute/query?code=%s" % (TENCENT_IFZQ, symbol)
+    text = _get(url, headers=TENCENT_HEADERS, decode="utf-8")
+    import json
+    try:
+        data = json.loads(text)
+    except Exception:
+        raise DataSourceError("当日分时JSON解析失败")
+    dwrap = data.get("data")
+    if not isinstance(dwrap, dict):
+        # 未知代码/无该品种数据时腾讯可能返回 data: []（如美股 gb_ 代码非交易时段）
+        raise DataSourceError("当日分时数据为空")
+    node = dwrap.get(symbol)
+    if not isinstance(node, dict):
+        raise DataSourceError("当日分时数据格式异常")
+    dnode = node.get("data") or {}
+    rows = dnode.get("data") or []
+    if not isinstance(rows, list):
+        raise DataSourceError("当日分时数据格式异常")
+    # 昨收：qt 行情数组第 4 位（腾讯标准 v_ 行情格式）
+    prev_close = None
+    qt = node.get("qt") or {}
+    if isinstance(qt, dict):
+        q = qt.get(symbol) or []
+        if len(q) > 4:
+            try:
+                prev_close = float(q[4])
+            except (ValueError, TypeError):
+                prev_close = None
+    times, price, volume, amount = [], [], [], []
+    for line in rows:
+        parts = str(line or "").split()
+        if len(parts) < 4:
+            continue
+        try:
+            t = parts[0]
+            if len(t) == 4:
+                t = "%s:%s" % (t[:2], t[2:])
+            times.append(t)
+            price.append(float(parts[1]))
+            volume.append(float(parts[2]))
+            amount.append(float(parts[3]))
+        except (ValueError, TypeError):
+            continue
+    if not times:
+        raise DataSourceError("当日分时数据为空")
+    return {"times": times, "price": price, "volume": volume,
+            "amount": amount, "prev_close": prev_close}
+
+
+def aggregate_kline(k, period):
+    """
+    把细粒度K线聚合为更大周期（真实数据加工，不引入虚拟数据）。
+    k: {"dates":["YYYY-MM-DD"...], "ohlc":[[o,c,l,h]...], "volume":[...]}
+    period: week(ISO周) / month / year。
+    组内: open=首日开、close=末日收、high=组内最高、low=组内最低、volume=求和；
+    date 取组内最后一个日期（与腾讯原生周/月K的取末日惯例一致）。
+    """
+    if period not in ("week", "month", "year"):
+        return k
+    groups = []
+    for d, oc, vol in zip(k["dates"], k["ohlc"], k["volume"]):
+        ds = str(d).replace("/", "-")[:10]
+        try:
+            dt = datetime.strptime(ds, "%Y-%m-%d")
+        except Exception:
+            continue
+        if period == "week":
+            iso = dt.isocalendar()
+            key = (iso[0], iso[1])
+        elif period == "month":
+            key = (dt.year, dt.month)
+        else:
+            key = (dt.year,)
+        if groups and groups[-1]["key"] == key:
+            g = groups[-1]
+            g["close"] = oc[1]
+            if oc[2] < g["low"]:
+                g["low"] = oc[2]
+            if oc[3] > g["high"]:
+                g["high"] = oc[3]
+            g["volume"] += vol
+            g["date"] = ds
+        else:
+            groups.append({"key": key, "date": ds, "open": oc[0], "close": oc[1],
+                           "low": oc[2], "high": oc[3], "volume": vol})
+    out = {
+        "dates": [g["date"] for g in groups],
+        "ohlc": [[g["open"], g["close"], g["low"], g["high"]] for g in groups],
+        "volume": [g["volume"] for g in groups],
+    }
+    return out
 
 
 # ---------------------------------------------------------------
@@ -991,3 +1167,89 @@ def normalize_market(market):
         "bond": "BOND", "债券": "BOND", "可转债": "BOND",
     }
     return mapping.get(m.lower(), m.upper())
+
+
+# ---------------------------------------------------------------
+# 东财当日/最近交易日分时（v31 新增）
+# ---------------------------------------------------------------
+# 东财 trends2 为"最近 1 个交易日"逐分钟分时（北京时区时间标签）：
+#   - A股/港股指数：盘中返回当日分钟数据；
+#   - 美股指数：A股白天（美股休市）返回上一完整美股交易日的全天分时（391 点）。
+# 实测（2026-09-03）：push2his 对部分美股代码偶发断开，push2delay 稳定；
+# 东财对纳指综合(.IXIC)无分时，仅有 纳指100(100.NDX)/标普(100.SPX)/道指(100.DJIA) 等。
+EASTMONEY_TRENDS_HOST = "https://push2delay.eastmoney.com"
+
+# 指数代码 → 东财 secid（只收录与腾讯/新浪同标的项，避免标的不一致误导）
+INDEX_EM_SECID = {
+    # A股指数（东财：1=沪 0=深）
+    "sh000001": "1.000001", "sh000300": "1.000300", "sh000688": "1.000688",
+    "sh000016": "1.000016", "sh000905": "1.000905",
+    "sz399001": "0.399001", "sz399006": "0.399006", "sz399005": "0.399005",
+    "sz399300": "0.399300",
+    # 港股指数
+    "hkHSI": "100.HSI", "hkHSCEI": "100.HSCEI",
+    # 美股指数（纳指综合 IXIC 东财无，腾讯交易时段实时；无源时走本地跟踪）
+    "usNDX": "100.NDX", "usSPX": "100.SPX", "usINX": "100.SPX", "usDJI": "100.DJIA",
+}
+
+
+def em_secid(market, code):
+    """返回东财 secid；无映射返回 None。market 归一化大写。"""
+    m = normalize_market(market)
+    c = str(code)
+    if m == "US" and not c.lower().startswith("us"):
+        c = "us" + c
+    key = c
+    if m == "HK" and not c.lower().startswith("hk"):
+        key = "hk" + c
+    if m == "A":
+        key = c
+    return INDEX_EM_SECID.get(key)
+
+
+def eastmoney_trends(secid):
+    """
+    东财最近交易日逐分钟分时。返回统一结构或抛 DataSourceError：
+    {"dates": ["MM-DD HH:MM"...], "price": [...], "volume": [...], "amount": [...],
+     "avg_price": [...], "trade_date": "YYYY-MM-DD", "name": "..."}
+    行: "YYYY-MM-DD HH:MM,open,close,high,low,volume,amount,avg_price"
+    """
+    url = ("%s/api/qt/stock/trends2/get?secid=%s"
+           "&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
+           "&fields2=f51,f52,f53,f54,f55,f56,f57,f58&ndays=1&iscr=0"
+           % (EASTMONEY_TRENDS_HOST, secid))
+    text = _get(url, headers=EASTMONEY_HEADERS, decode="utf-8")
+    import json
+    try:
+        data = json.loads(text)
+    except Exception:
+        raise DataSourceError("东财分时JSON解析失败")
+    node = data.get("data") or {}
+    rows = node.get("trends") or []
+    if not isinstance(rows, list) or not rows:
+        raise DataSourceError("东财分时数据为空")
+    dates, price, volume, amount, avg = [], [], [], [], []
+    trade_date = ""
+    for line in rows:
+        p = str(line or "").split(",")
+        if len(p) < 8:
+            continue
+        try:
+            t = p[0]  # YYYY-MM-DD HH:MM
+            if not trade_date:
+                trade_date = t[:10]
+            # 展示用时间：MM-DD HH:MM
+            dates.append("%s %s" % (t[5:10], t[11:16]))
+            price.append(float(p[2]))
+            volume.append(float(p[5]))
+            amount.append(float(p[6]))
+            av = float(p[7])
+            avg.append(av if av > 0 else None)
+        except (ValueError, TypeError):
+            continue
+    if not dates:
+        raise DataSourceError("东财分时数据为空")
+    return {"dates": dates, "price": price, "volume": volume,
+            "amount": amount, "avg_price": avg,
+            "trade_date": trade_date or "",
+            "name": str(node.get("name") or "")}

@@ -176,7 +176,11 @@ export default function Analysis() {
             <EChart className="chart-md" option={{
               animation: false,
               tooltip: { trigger: 'axis' },
-              legend: { data: ['总市值', '总成本'], textStyle: { color: '#8b949e' }, top: 0 },
+              // 图例色显式对齐实际折线色（否则 ECharts 图例取默认调色板色，与线色不符）
+              legend: { data: [
+                { name: '总市值', itemStyle: { color: '#58a6ff' } },
+                { name: '总成本', itemStyle: { color: '#8b949e' } },
+              ], textStyle: { color: '#8b949e' }, top: 0 },
               grid: { left: 70, right: 20, top: 34, bottom: 30 },
               xAxis: { type: 'category', data: perf.dates, axisLabel: { color: '#8b949e' }, axisLine: { lineStyle: { color: '#2a3040' } } },
               yAxis: { type: 'value', scale: true, axisLabel: { color: '#8b949e', formatter: v => v >= 1e4 ? (v / 1e4).toFixed(1) + '万' : v }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },

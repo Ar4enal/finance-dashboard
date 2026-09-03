@@ -12,7 +12,12 @@ export const api = {
   // 行情
   quotes: (market, code) => request(`/api/quotes?market=${market}&code=${code}`),
   batchQuotes: (items) => request(`/api/quotes/batch?items=${items}`),
-  kline: (market, code, count = 120) => request(`/api/kline?market=${market}&code=${code}&count=${count}`),
+  // K线：period = day|week|month|year|m1|m5|m15|m30|m60（v31 起支持多周期与分钟K）
+  kline: (market, code, period = 'day', count) => request(`/api/kline?market=${market}&code=${code}&period=${period}${count ? '&count=' + count : ''}`),
+  // 当日分时（腾讯 minute/query）：A股/港股有数据；返回 {available, times, price, avg_price, volume, amount, prev_close, note}
+  intraday: (market, code) => request(`/api/kline/intraday?market=${market}&code=${code}`),
+  // 指数卡片迷你分时批量（轻量：price/prev_close/trade_date/source/note）
+  intradayBatch: (items) => request(`/api/kline/intraday/batch?items=${items}`),
   // 基金
   fundDetail: (code) => request(`/api/fund/detail?code=${code}`),
   fundPenetrate: (code) => request(`/api/fund/penetrate?code=${code}`),

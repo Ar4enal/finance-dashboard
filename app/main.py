@@ -5,6 +5,8 @@
 兼容 Python 3.7。
 """
 import os
+import re
+import time
 from datetime import datetime
 from typing import Optional, List
 
@@ -16,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from . import datasource as ds
 from . import indicators as ind
 from . import database as db
+from . import intraday_track as itrack
 
 app = FastAPI(title="金融工作台", version="1.0.0")
 
@@ -87,60 +90,133 @@ def batch_quotes(items: str = Query(..., description="格式: A:sh600519,US:aapl
 # =========================================================
 # K线 + 技术指标
 # =========================================================
-def _fetch_kline(sym, period="day", count=120):
-    """腾讯 fqkline 优先；不足 2 根回退新浪 K 线。任何异常都返回空（由调用方决定提示）。"""
-    k = {"dates": [], "ohlc": [], "volume": []}
-    try:
-        k = ds.tencent_kline(sym, period=period, count=count)
-    except Exception:
-        k = {"dates": [], "ohlc": [], "volume": []}
-    if len(k["dates"]) < 2:
-        try:
-            k = ds.sina_kline(sym, scale=240, datalen=count)
-        except Exception:
-            k = {"dates": [], "ohlc": [], "volume": []}
+# 周期与取数档位（v31）：日K/周K/月K/年K 覆盖长历史（腾讯原生 day/week/month +
+# 月K聚合年K，前复权；个股日K前复权源上限约 640 根≈2.6年，指数/港股约 1000 根）；
+# 分钟K（m1/m5/m15/m30/m60）仅 A股（含指数）有真实数据源。
+PERIOD_SCALE_SINA = {"day": 240, "week": 1200, "month": 7200}   # 新浪 scale 映射
+PERIOD_DEFAULT_COUNT = {"day": 1000, "week": 640, "month": 500, "year": 60,
+                        "m1": 240, "m5": 240, "m15": 240, "m30": 240, "m60": 240}
+MINUTE_PERIODS = ("m1", "m5", "m15", "m30", "m60")
+AGG_PERIODS = ("week", "month", "year")
+
+
+def _slice_k(k, count):
+    if count and count > 0 and len(k.get("dates") or []) > count:
+        return {"dates": k["dates"][-count:], "ohlc": k["ohlc"][-count:],
+                "volume": k["volume"][-count:]}
     return k
 
 
+def _kline_period(sym, period, count):
+    """按周期取 K 线（腾讯/新浪原生优先，细粒度聚合兜底），返回统一 dict；失败返回空 dict。
+    period ∈ day/week/month/year；sym 为腾讯/新浪通用代码（如 sh600519 / hk00700 / usAAPL.OQ）。
+    - day：腾讯 fqkline 优先 → 新浪 scale=240；
+    - week/month：腾讯原生 → 新浪原生 → 日K聚合兜底（北交所等）；
+    - year：腾讯 month → 新浪 month → 聚合年度（腾讯 year 仅返回当年 1 根，故统一走月K聚合，
+      聚合为真实数据加工，不引入虚拟数据）。"""
+    out = {"dates": [], "ohlc": [], "volume": []}
+    if period == "day":
+        for fn in (lambda: ds.tencent_kline(sym, "day", count),
+                   lambda: ds.sina_kline(sym, scale=240, datalen=max(count, 300))):
+            try:
+                k = fn()
+            except Exception:
+                continue
+            if len(k.get("dates") or []) >= 2:
+                return _slice_k(k, count)
+        return out
+    if period in ("week", "month"):
+        scale = PERIOD_SCALE_SINA[period]
+        for fn in (lambda: ds.tencent_kline(sym, period, count),
+                   lambda: ds.sina_kline(sym, scale=scale, datalen=max(count * 2, 300))):
+            try:
+                k = fn()
+            except Exception:
+                continue
+            if len(k.get("dates") or []) >= 2:
+                return _slice_k(k, count)
+        # 日K聚合兜底
+        day_k = out
+        try:
+            day_k = ds.sina_kline(sym, scale=240, datalen=1200)
+        except Exception:
+            try:
+                day_k = ds.tencent_kline(sym, "day", 1600)
+            except Exception:
+                day_k = out
+        if len(day_k.get("dates") or []) >= 2:
+            return _slice_k(ds.aggregate_kline(day_k, period), count)
+        return out
+    # year：月K聚合年度
+    for fn in (lambda: ds.tencent_kline(sym, "month", 640),
+               lambda: ds.sina_kline(sym, scale=7200, datalen=800)):
+        try:
+            m = fn()
+        except Exception:
+            continue
+        if len(m.get("dates") or []) >= 2:
+            return _slice_k(ds.aggregate_kline(m, "year"), count)
+    return out
+
+
+def _fetch_kline(sym, period="day", count=120):
+    """腾讯/新浪周期K线取数，任何异常都返回空 dict（由调用方决定提示口径）。"""
+    try:
+        return _kline_period(sym, period, count)
+    except Exception:
+        return {"dates": [], "ohlc": [], "volume": []}
+
+
 @app.get("/api/kline")
-def get_kline(market: str, code: str, period: str = "day", count: int = 120):
+def get_kline(market: str, code: str, period: str = "day", count: int = None):
     mkt = ds.normalize_market(market)
     proxied = False
     proxy_note = None
+    if period not in (("day",) + tuple(AGG_PERIODS) + MINUTE_PERIODS):
+        return fail("不支持的周期: %s" % period)
+    if count is None or count <= 0:
+        count = PERIOD_DEFAULT_COUNT.get(period, 640)
     try:
-        # 基金：用天天基金单位净值历史（无盘中OHLC，构造等值K线）
-        if mkt == "FUND":
+        # ---- 分钟K线（分时K线）：仅 A股（含指数）有真实数据源 ----
+        if period in MINUTE_PERIODS:
+            if mkt != "A":
+                return fail("该标的分时/分钟K线数据源暂不可用（当前仅A股提供分钟K线）")
+            sym = ds.to_sina_symbol(mkt, code)
             try:
-                k = ds.fund_kline(code, count=count)
+                k = ds.tencent_mkline(sym, freq=period, count=count)
+            except ds.DataSourceError as e:
+                return fail("分钟K线数据暂不可用（%s）" % str(e))
+            if len(k["dates"]) < 2:
+                return fail("分钟K线数据暂不可用")
+        # ---- 基金：天天基金单位净值历史（无盘中OHLC，等值K线；周/月/年按净值日聚合）----
+        elif mkt == "FUND":
+            try:
+                need = {"day": count, "week": count * 7, "month": count * 31,
+                        "year": count * 366}.get(period, count)
+                k = ds.fund_kline(code, count=max(need, 300))
             except ds.DataSourceError:
                 return fail("基金K线获取失败")
             if not k["dates"]:
                 return fail("基金K线数据为空")
+            if period != "day":
+                k = _slice_k(ds.aggregate_kline(k, period), count)
+        # ---- 黄金：新浪期货日K（周/月/年按日K聚合，真实加工）----
         elif mkt == "GOLD":
-            # v25：实物黄金 / 期货黄金指数 K 线。
-            # 实物黄金(code=GOLD_PHYSICAL)固定用 au9999（取不到回退沪金连续）；
-            # 期货指数：沪金(nf_AU0/AU0)→新浪 AU0、纽约金(hf_GC)→新浪 GC0、伦敦金(hf_XAU)→新浪 XAUUSD。
-            # 腾讯 fqkline 对黄金期货代码返回空，故黄金期货统一走新浪期货日K线接口；
-            # 真实数据源确实取不到时（如纽约金/伦敦金在可访问源为空）诚实返回提示，绝不造假。
             if code == "GOLD_PHYSICAL":
-                # 实物黄金（沪金）K线：沪金连续 AU0（新浪期货，真实数据；au9999 现货无历史K线源）
                 try:
-                    k = ds.sina_futures_kline("AU0", count=count)
+                    k = ds.sina_futures_kline("AU0", count=max(count * 366, 2000) if period != "day" else count)
                 except ds.DataSourceError as e:
                     return fail("实物黄金K线数据源暂不可用（%s）" % str(e))
             else:
                 futures_map = {"nf_AU0": "AU0", "AU0": "AU0", "hf_GC": "GC0", "hf_XAU": "XAUUSD"}
                 fsym = futures_map.get(code, code)
                 try:
-                    k = ds.sina_futures_kline(fsym, count=count)
+                    k = ds.sina_futures_kline(fsym, count=max(count * 366, 2000) if period != "day" else count)
                 except ds.DataSourceError:
-                    # 纽约金(hf_GC)/伦敦金(hf_XAU)真实历史K线源在当前可访问源均不可达
-                    # （实测：新浪 GC0/XAUUSD 返回空、腾讯 fqkline 返回空、东财 push2his 整体不可达），
-                    # 回退沪金 AU0 真实K线并诚实标注 proxied，绝不伪造纽约金/伦敦金数据。
                     if code in ("hf_GC", "hf_XAU"):
                         label = "纽约金(COMEX GC)" if code == "hf_GC" else "伦敦金(XAU/USD)"
                         try:
-                            k = ds.sina_futures_kline("AU0", count=count)
+                            k = ds.sina_futures_kline("AU0", count=max(count * 366, 2000) if period != "day" else count)
                         except ds.DataSourceError as e:
                             return fail("黄金K线数据源暂不可用（%s）" % str(e))
                         proxied = True
@@ -149,21 +225,32 @@ def get_kline(market: str, code: str, period: str = "day", count: int = 120):
                                       % (label, label))
                     else:
                         return fail("该黄金品种K线数据源暂不可用")
+            if not k["dates"]:
+                return fail("K线数据暂不可用")
+            if period != "day":
+                k = _slice_k(ds.aggregate_kline(k, period), count)
+        # ---- 美股个股/海外指数：个股 fqkline → 指数 usfqkline ----
         elif mkt == "US":
-            # 美股/海外指数修复（v22）：先走个股路径 usCODE.OQ，若拿到 >=2 根视为个股；
-            # 否则当作指数改用 usfqkline（usCODE）取完整历史。
-            sym = "us" + code.upper() + ".OQ"
-            try:
-                k = ds.tencent_kline(sym, period=period, count=count)
-            except Exception:
+            if period in MINUTE_PERIODS:
+                return fail("该标的分时/分钟K线数据源暂不可用（当前数据源仅A股提供分钟K线）")
+            code_u = code.upper()
+            k = _kline_period("us" + code_u + ".OQ", period, count)  # 美股个股
+            if len(k.get("dates") or []) < 2:
+                # 指数：usfqkline（仅 qfq 键；day/week/month 原生，year=month 聚合）
                 k = {"dates": [], "ohlc": [], "volume": []}
-            if len(k["dates"]) < 2:
                 try:
-                    k = ds.tencent_us_index_kline("us" + code.upper(), period=period, count=count)
+                    if period == "year":
+                        m = ds.tencent_us_index_kline("us" + code_u, "month", 640)
+                        if len(m.get("dates") or []) >= 2:
+                            k = ds.aggregate_kline(m, "year")
+                    else:
+                        k = ds.tencent_us_index_kline("us" + code_u, period, count)
                 except Exception:
                     k = {"dates": [], "ohlc": [], "volume": []}
+                if len(k.get("dates") or []) >= 2:
+                    k = _slice_k(k, count)
         else:
-            # 国内/港股/黄金/债券等：腾讯 fqkline 为主源；不足 2 根回退新浪。
+            # 国内/港股/债券等：腾讯 fqkline（v31 起 proxy 域名）为主源；新浪为备；聚合兜底。
             sym = ds.to_sina_symbol(mkt, code)
             k = _fetch_kline(sym, period=period, count=count)
         if not k["dates"]:
@@ -180,6 +267,7 @@ def get_kline(market: str, code: str, period: str = "day", count: int = 120):
             "volume": k["volume"],
             "ma5": ma5, "ma10": ma10, "ma20": ma20,
             "macdDIF": dif, "macdDEA": dea, "macdBAR": bar,
+            "period": period,
             "proxied": proxied,
             "proxy_note": proxy_note,
         })
@@ -188,6 +276,167 @@ def get_kline(market: str, code: str, period: str = "day", count: int = 120):
     except Exception:
         # 任何未预期异常都返回友好提示，绝不让端点抛出 500（避免前端 JSON.parse 报 "Internal Server Error"）
         return fail("K线数据暂不可用")
+
+
+# ---------------------------------------------------------------
+# 当日/最近交易日分时：统一数据链（v31）
+#   1) 腾讯 minute/query —— 当日逐分钟实时（A股/港股盘中；美股其交易时段）；
+#   2) 东财 trends2     —— 最近交易日逐分钟（A/港股盘中=当日；美股=上一美股交易日全天）；
+#   3) 本地跟踪文件     —— 确认无任何真实分时源的指数，由其交易时段内每分钟新浪报价采样积累；
+#   4) 全无 → available=False + 明确 note（绝不造假），并登记本地跟踪等待积累。
+# 每个响应带 source 与 trade_date（数据所属交易日），前端可标注"最近交易日"。
+# ---------------------------------------------------------------
+_INTRA_CACHE = {}          # key -> (ts, result)，30s 缓存降低批量探测开销
+_INTRA_CACHE_TTL = 30
+
+
+def _intra_note_unavailable(mkt):
+    d, hhmm = itrack.market_local_dt(mkt)
+    if mkt == "US":
+        t = int(hhmm)
+        if 915 <= t <= 1615:
+            return ("该美股指数实时分时数据源暂不可用，已启用本地跟踪："
+                    "美股开盘期间保持本工作台运行，将每分钟自动记录当天分时")
+        return ("美股当前休市（美东 %s:%s）。实时分时仅在其交易时段提供；"
+                "已启用本地跟踪，美股开盘期间保持本工作台运行将自动记录当天分时"
+                % (hhmm[:2], hhmm[2:]))
+    t = int(hhmm)
+    active = (mkt == "A" and 915 <= t <= 1505) or (mkt == "HK" and 915 <= t <= 1610)
+    if active:
+        return "该标的分时数据源暂不可用，已启用本地跟踪（交易时段每分钟自动记录）"
+    return ("非交易时段，暂无当日分时数据（本地跟踪已启用：下一交易日交易时段"
+            "每分钟自动记录当天分时，并在每个新交易日重置）")
+
+
+def _intraday_for(market, code, want_detail=True):
+    """统一分时数据链，返回 dict：
+    {available, source, trade_date, times, price, avg_price, volume, amount,
+     prev_close, name, note}。"""
+    mkt = ds.normalize_market(market)
+    c = str(code)
+    key = "%s|%s" % (mkt, c)
+    hit = _INTRA_CACHE.get(key)
+    if hit and time.time() - hit[0] < _INTRA_CACHE_TTL:
+        return hit[1]
+    out = {"available": False, "source": None, "trade_date": "", "times": [],
+           "price": [], "avg_price": [], "volume": [], "amount": [],
+           "prev_close": None, "name": "", "note": ""}
+    if mkt in ("FUND", "GOLD"):
+        out["note"] = "基金/黄金仅有日级数据，无当日分时"
+        _INTRA_CACHE[key] = (time.time(), out)
+        return out
+    sym = ds.to_sina_symbol(mkt, c)
+    loc_date, _hh = itrack.market_local_dt(mkt)
+
+    # ---- 1) 腾讯当日实时 ----
+    try:
+        d = ds.tencent_minute_today(sym)
+        if len(d.get("times") or []) >= 2:
+            mult = 100.0 if mkt == "A" else 1.0
+            vol_share = [v * mult for v in d["volume"]]
+            is_index = mkt == "A" and (re.match(r"^sh000\d{3}$", sym) or re.match(r"^sz399\d{3}$", sym)
+                                       or re.match(r"^bj899\d{3}$", sym))
+            avg = []
+            for amt, vs in zip(d["amount"], vol_share):
+                avg.append(round(amt / vs, 3) if (not is_index and vs > 0) else None)
+            minute_vol = [vol_share[0]] if vol_share else []
+            for i in range(1, len(vol_share)):
+                minute_vol.append(max(vol_share[i] - vol_share[i - 1], 0))
+            out.update({
+                "available": True, "source": "tencent", "trade_date": loc_date,
+                "times": d["times"], "price": d["price"], "avg_price": avg,
+                "volume": minute_vol, "amount": d["amount"],
+                "prev_close": d.get("prev_close"),
+                "note": "分时数据源：腾讯行情（当日逐分钟实时）",
+            })
+            itrack.remove_tracked(mkt, c)  # 有真实源 → 无需本地跟踪
+            _INTRA_CACHE[key] = (time.time(), out)
+            return out
+    except ds.DataSourceError:
+        pass
+
+    # ---- 2) 东财最近交易日 ----
+    secid = ds.em_secid(mkt, c)
+    if secid:
+        try:
+            e = ds.eastmoney_trends(secid)
+            if len(e.get("price") or []) >= 2:
+                # 昨收：腾讯报价探测不到时用新浪报价反推（东财响应无 prePrice 字段）
+                prev = None
+                try:
+                    q = ds.sina_quotes([sym]).get(sym) or {}
+                    if q.get("prev"):
+                        prev = q["prev"]
+                    elif q.get("price") and q.get("pct") is not None and q["pct"] != 0:
+                        prev = round(q["price"] / (1 + q["pct"] / 100.0), 4)
+                except Exception:
+                    prev = None
+                out.update({
+                    "available": True, "source": "eastmoney",
+                    "trade_date": e.get("trade_date") or loc_date,
+                    "times": e["dates"], "price": e["price"],
+                    "avg_price": e.get("avg_price") or [], "volume": e.get("volume") or [],
+                    "amount": e.get("amount") or [], "prev_close": prev,
+                    "name": e.get("name") or "",
+                    "note": "分时数据源：东方财富（最近交易日逐分钟）",
+                })
+                itrack.remove_tracked(mkt, c)  # 有真实源 → 无需本地跟踪
+                _INTRA_CACHE[key] = (time.time(), out)
+                return out
+        except ds.DataSourceError:
+            pass
+
+    # ---- 3) 本地跟踪文件 ----
+    local = itrack.read_local(mkt, c)
+    if local and len(local.get("points") or []) >= 2:
+        pts = local["points"]
+        out.update({
+            "available": True, "source": "local",
+            "trade_date": local.get("trade_date") or "",
+            "times": [p["t"][5:16] for p in pts],
+            "price": [p["price"] for p in pts],
+            "avg_price": [], "volume": [], "amount": [],
+            "prev_close": local.get("prev_close"),
+            "note": "分时数据源：本地跟踪记录（每分钟采样，交易日自动重置）",
+        })
+        _INTRA_CACHE[key] = (time.time(), out)
+        return out
+
+    # ---- 4) 全无：登记本地跟踪 + 明确提示 ----
+    itrack.ensure_tracked(mkt, c, name=c)
+    out["note"] = _intra_note_unavailable(mkt)
+    _INTRA_CACHE[key] = (time.time(), out)
+    return out
+
+
+@app.get("/api/kline/intraday")
+def get_intraday(market: str, code: str):
+    """当日/最近交易日分时（统一数据链，见 _intraday_for）。
+    返回 {available, source, trade_date, times, price, avg_price, volume, amount,
+    prev_close, note}；无法取到真实数据时 available=False + note，绝不造假。"""
+    return ok(_intraday_for(market, code, want_detail=True))
+
+
+@app.get("/api/kline/intraday/batch")
+def get_intraday_batch(items: str = Query(..., description="格式: A:sh000001,US:ixic")):
+    """指数卡片迷你分时批量接口（轻量：仅 price/prev_close/trade_date）。
+    每项走统一数据链，30s 缓存；无源指数自动登记本地跟踪。"""
+    result = {}
+    for item in items.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            mkt, code = item.split(":", 1)
+        else:
+            mkt, code = "A", item
+        d = _intraday_for(mkt, code, want_detail=False)
+        result["%s:%s" % (ds.normalize_market(mkt), code)] = {
+            "available": d["available"], "source": d["source"],
+            "trade_date": d["trade_date"], "price": d["price"],
+            "prev_close": d["prev_close"], "note": d["note"],
+        }
+    return ok(result)
 
 
 # =========================================================
@@ -1442,6 +1691,10 @@ def health():
 def startup():
     db.init_db()
     db.init_default_indices()  # 首次启动填充内置预置指数
+    try:
+        itrack.start()  # 启动「无源指数分时」本地跟踪线程（每分钟采样，每交易日重置）
+    except Exception:
+        pass
 
 
 # =========================================================
