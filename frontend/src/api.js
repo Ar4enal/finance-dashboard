@@ -58,6 +58,8 @@ export const api = {
   pnlAnalysis: (type, range) => request(`/api/portfolio/pnl-analysis?type=${type}${range ? '&range_val=' + encodeURIComponent(range) : ''}`),
   // 总览卡片详情：近 N 天每日收益序列（holding=当前持仓收益 / cum=累计收益）
   pnlSeries: (days = 30, kind = 'holding') => request(`/api/portfolio/pnl-series?days=${days}&kind=${kind}`),
+  // 总览「当日收益」卡片（v32）：实时行情口径，当日各持仓 数量×(现价−昨收) 求和
+  dayPnl: () => request('/api/portfolio/day-pnl'),
   // 收益分析编辑覆盖（v25）
   savePnlOverride: (market, code, pnlType, rangeVal, detailPnl, comboPnl) => {
     const params = new URLSearchParams()

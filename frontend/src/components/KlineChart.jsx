@@ -79,6 +79,35 @@ const PERIOD_LABEL = PERIOD_TABS.reduce((m, t) => { m[t.key] = t.label; return m
 const PERIOD_CNT = { day: 1000, week: 640, month: 500, year: 60,
                      m1: 240, m5: 240, m15: 240, m30: 240, m60: 240 }
 
+// ---------------------------------------------------------------------------
+// K线默认视野（v32）：按周期对齐「自然日期窗口」，所有标的（指数/个股/基金/港股
+// 等）统一生效。数据仍按 PERIOD_CNT 拉满（可拖动回看更早历史），打开时仅默认
+// 聚焦最近窗口：
+//   日K → 近 6 个月   周K → 近 1 年半（18 个月）
+//   月K → 近 5 年（60 个月）   年K → 近 10 年（120 个月）
+// 从「最后一根K线日期」向前回推 N 个月得到 cutoff，取首个日期 ≥ cutoff 的K线为
+// 视野起点（窗口随最新数据自动平移）；历史不足窗口长度时自动显示全部。
+// 分钟K（m1~m60）无「日期窗口」语义，维持原固定比例视野（start:40）。
+// ---------------------------------------------------------------------------
+const PERIOD_VIEW_MONTHS = { day: 6, week: 18, month: 60, year: 120 }
+
+function buildDefaultZoom(period, dates) {
+  const months = PERIOD_VIEW_MONTHS[period]
+  if (!months || !dates || dates.length < 2) return null
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dates[dates.length - 1]).slice(0, 10))
+  if (!m) return null
+  // 最新K线日期向前回推 N 个月（Date 自动处理月份溢出与跨年）
+  const cut = new Date(+m[1], +m[2] - 1 - months, +m[3])
+  const pad = (n) => String(n).padStart(2, '0')
+  const cutoff = cut.getFullYear() + '-' + pad(cut.getMonth() + 1) + '-' + pad(cut.getDate())
+  let start = 0
+  for (let i = 0; i < dates.length; i++) {
+    if (String(dates[i]).slice(0, 10) >= cutoff) { start = i; break }
+  }
+  if (start >= dates.length) start = dates.length - 1
+  return { startValue: start, endValue: dates.length - 1 }
+}
+
 // 分时走势视图（ECharts）：价格线 + 均价线 + 昨收基准 + 底部量柱（红涨绿跌）
 // 说明：
 // - 均价线仅个股/港股显示（指数无"均价"概念，后端 avg 为 null）；
@@ -237,6 +266,9 @@ function KlineView({ kdata, markers, period }) {
     return items
   }
   const markLineData = isKPeriod ? buildMarkLine(markers, dates, ohlc) : null
+  // v32：默认视野 = 按周期对齐自然日期窗口（日K近6个月/周K近1年半/月K近5年/年K近10年，
+  // 所有标的一致；历史不足窗口时显示全部）；分钟K不适用则维持原固定比例。
+  const defaultZoom = buildDefaultZoom(period, dates) || { type: 'inside', xAxisIndex: [0, 1, 2], start: 40, end: 100 }
 
   // 图例选中状态变化：把「未选中」的双色图例图标换成灰版（image 图标不会自动置灰）
   const onLegendSelectChanged = useCallback((params) => {
@@ -275,7 +307,7 @@ function KlineView({ kdata, markers, period }) {
       { gridIndex: 1, scale: true, axisLabel: { color: '#8b949e', formatter: (v) => (v >= 1e8 ? (v / 1e8).toFixed(1) + '亿' : v >= 1e4 ? (v / 1e4).toFixed(0) + '万' : v) }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },
       { gridIndex: 2, scale: true, axisLabel: { color: '#8b949e' }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },
     ],
-    dataZoom: [{ type: 'inside', xAxisIndex: [0, 1, 2], start: 40, end: 100 }],
+    dataZoom: [defaultZoom],
     series: [
       {
         name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
@@ -322,10 +354,11 @@ function KlineView({ kdata, markers, period }) {
 }
 
 export default function KlineChart({ market, code, markers, preferMinute }) {
-  // 分时真实数据源：A股/港股（含指数）当日实时；美股指数等休市时段显示"最近交易日"或本地跟踪。
-  // preferMinute=true（指数卡片打开）：无条件先请求分时，无当日源时自动落回日K并提示；
+  // 分时真实数据源：A股/港股（含指数）当日实时；美股指数等休市时段显示"最近交易日"或本地跟踪；
+  // GOLD（纽约金/沪金/伦敦金等期货指数）无外部逐分钟源，分时 = 本地记录（v32 需求5），故分时 tab 放行。
+  // preferMinute=true（指数卡片打开）：无条件先请求分时，无当日源时自动落回日K并提示（GOLD 例外：等待本地记录出图）；
   // 否则仅 A/HK/BOND 默认分时，其余市场直接日K。
-  const canMinute = market === 'A' || market === 'HK' || market === 'BOND'
+  const canMinute = market === 'A' || market === 'HK' || market === 'BOND' || market === 'GOLD'
   const canMinuteK = market === 'A'
   const [period, setPeriod] = useState(preferMinute || canMinute ? 'minute' : 'day')
   const [kdata, setKdata] = useState(null)   // 周期/分钟K数据
@@ -357,8 +390,14 @@ export default function KlineChart({ market, code, markers, preferMinute }) {
           } else {
             // 无真实分时数据：未手动操作时自动落回日K并说明；手动点击则给出原因
             if (!userTouched.current) {
-              setMsg((d && d.note) ? ('分时数据源暂不可用，已自动显示日K（' + d.note + '）') : '该标的分时数据暂不可用，已自动显示日K')
-              setPeriod('day')
+              if (market === 'GOLD') {
+                // v32 需求5：黄金指数分时=本地记录，无点即"记录中"——保持分时视图，由轮询自动出图
+                setMsg((d && d.note) ? d.note : '分时数据源暂不可用（本地记录中，满 2 点自动显示）')
+                setIntra(null); setKdata(null); setLoading(false)
+              } else {
+                setMsg((d && d.note) ? ('分时数据源暂不可用，已自动显示日K（' + d.note + '）') : '该标的分时数据暂不可用，已自动显示日K')
+                setPeriod('day')
+              }
             } else {
               setIntra(null); setKdata((k) => k || null)
               setErr((d && d.note) ? d.note : '该标的分时数据暂不可用')
@@ -369,8 +408,13 @@ export default function KlineChart({ market, code, markers, preferMinute }) {
         .catch((e) => {
           if (!alive) return
           if (!userTouched.current) {
-            setMsg('分时数据获取失败，已自动显示日K')
-            setPeriod('day')
+            if (market === 'GOLD') {
+              setMsg('分时数据暂不可用，正在重试（本地记录中）')
+              setIntra(null); setKdata(null); setLoading(false)
+            } else {
+              setMsg('分时数据获取失败，已自动显示日K')
+              setPeriod('day')
+            }
           } else {
             setErr(e.message); setLoading(false)
           }
@@ -394,6 +438,27 @@ export default function KlineChart({ market, code, markers, preferMinute }) {
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [market, code, period])
+
+  // v32 需求5：黄金指数（GOLD）分时=本地记录。当前无分时数据时每 12s 轮询一次，
+  // 一旦本地记录满 2 点（available）即自动切换显示当日分时曲线；手动切分时也生效。
+  useEffect(() => {
+    if (market !== 'GOLD' || !code || period !== 'minute' || intra || loading) return
+    const timer = setInterval(() => {
+      api.intraday(market, code)
+        .then((d) => {
+          if (d && d.available && d.times && d.times.length >= 2) {
+            clearInterval(timer)
+            setIntra(d); setLoading(false)
+            if (d.note) setMsg(d.note)
+          } else if (d && d.note) {
+            setMsg(d.note)   // 记录中：实时刷新已采样点数等提示
+          }
+        })
+        .catch(() => {})
+    }, 12000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [market, code, period, intra, loading])
 
   const handleTab = (key) => {
     if (key === period) return
@@ -437,7 +502,13 @@ export default function KlineChart({ market, code, markers, preferMinute }) {
       {err && <div className="kline-proxy-note" style={{ color: '#f85149' }}>⚠️ {err}</div>}
       {showIntra && <IntradayView data={intra} />}
       {showK && <KlineView kdata={kdata} markers={markers} period={period} />}
-      {!loading && !showK && !showIntra && (
+      {!loading && period === 'minute' && market === 'GOLD' && !intra && (
+        <div className="empty" style={{ padding: 40, textAlign: 'center', color: '#8b949e' }}>
+          ⏳ 分时数据记录中…（本地记录：系统运行期间每分钟采样该品种真实实时价作为当日分时，
+          满 2 分钟自动显示曲线；可先点上方「日K」查看历史）
+        </div>
+      )}
+      {!loading && !showK && !showIntra && !(period === 'minute' && market === 'GOLD') && (
         <div className="empty" style={{ padding: 40, textAlign: 'center', color: '#8b949e' }}>
           📭 暂无数据
         </div>

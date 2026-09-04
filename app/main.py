@@ -290,8 +290,21 @@ _INTRA_CACHE = {}          # key -> (ts, result)，30s 缓存降低批量探测�
 _INTRA_CACHE_TTL = 30
 
 
-def _intra_note_unavailable(mkt):
+def _intra_note_unavailable(mkt, code=None):
     d, hhmm = itrack.market_local_dt(mkt)
+    if mkt == "GOLD":
+        # 黄金指数分时 = 本地记录（v32 需求5）：动态附上已记录点数，直观反馈"记录中"
+        n = 0
+        try:
+            local = itrack.read_local(mkt, code or "")
+            n = len((local or {}).get("points") or [])
+        except Exception:
+            pass
+        tail = ("已记录 %d 个采样点，满 2 点后自动显示当日分时曲线。" % n) if n >= 1 \
+            else "系统将在下一分钟采样首个实时价（真实行情源）。"
+        return ("该黄金指数无外部实时分时数据源，分时已改用本地记录：系统运行期间每"
+                "分钟自动记录其当日实时价作为分时数据源（按北京自然日，0点重置）。%s"
+                "当日更早数据无法回补（绝不虚构），建议交易时段保持本工作台运行以积累完整曲线。" % tail)
     if mkt == "US":
         t = int(hhmm)
         if 915 <= t <= 1615:
@@ -321,12 +334,34 @@ def _intraday_for(market, code, want_detail=True):
     out = {"available": False, "source": None, "trade_date": "", "times": [],
            "price": [], "avg_price": [], "volume": [], "amount": [],
            "prev_close": None, "name": "", "note": ""}
-    if mkt in ("FUND", "GOLD"):
-        out["note"] = "基金/黄金仅有日级数据，无当日分时"
+    if mkt == "FUND":
+        out["note"] = "基金仅有日级净值数据，无当日分时"
         _INTRA_CACHE[key] = (time.time(), out)
         return out
     sym = ds.to_sina_symbol(mkt, c)
     loc_date, _hh = itrack.market_local_dt(mkt)
+
+    # ---- 0) 黄金（GOLD 期货指数：纽约金/沪金/伦敦金等）：无外部逐分钟源，
+    #          分时 = 本地记录（系统运行期间每分钟采样当日实时价，v32 需求5）----
+    if mkt == "GOLD":
+        local = itrack.read_local(mkt, c)
+        if local and len(local.get("points") or []) >= 2:
+            pts = local["points"]
+            out.update({
+                "available": True, "source": "local",
+                "trade_date": local.get("trade_date") or "",
+                "times": [p["t"][5:16] for p in pts],
+                "price": [p["price"] for p in pts],
+                "avg_price": [], "volume": [], "amount": [],
+                "prev_close": local.get("prev_close"),
+                "note": "分时数据源：本地记录（系统每分钟记录当日实时价，0点重置）",
+            })
+            _INTRA_CACHE[key] = (time.time(), out)
+            return out
+        itrack.ensure_tracked(mkt, c, name=c)
+        out["note"] = _intra_note_unavailable(mkt, c)
+        _INTRA_CACHE[key] = (time.time(), out)
+        return out
 
     # ---- 1) 腾讯当日实时 ----
     try:
@@ -584,22 +619,41 @@ def penetration_holdings():
 # =========================================================
 @app.get("/api/gold")
 def gold_holding():
-    """实物黄金持仓 + 实时国内金价（元/克）。"""
+    """实物黄金持仓 + 实时国内金价（元/克）。
+    v32 需求3 起附带实物黄金三项盈亏：
+      pnl=持仓盈亏、cum_pnl=累计盈亏、day_pnl=当日盈亏（克数×(今价−沪金AU0昨收)）。
+    v32fix：pnl/cum_pnl 与持仓明细实物黄金条目同源（复用 _gold_position，
+    含用户在持仓卡片手动编辑的累计/持仓收益覆盖），保证两处显示永远一致；
+    day_pnl 为实时口径独立计算。金价/昨收不可用或未持仓时对应字段 None，绝不填充虚拟值。"""
     holding = db.get_gold_holding()
     g = ds.gold_cn_price()
+    sess = _gold_session_status(g)      # 金价交易状态（跟随当前源），价不可用为 None
     grams = holding["grams"]
     cost_price = holding["cost_price"]
-    # 实时市值与盈亏；金价不可用时返回 available=False
+    cost = round(cost_price * grams, 2)
+    rpnl = db.compute_gold_realized_pnl()
+    # 实时市值与盈亏；金价可用且持仓时复用持仓明细同源计算（含用户收益编辑覆盖）
+    market_value = None
+    pnl = None
+    pnl_pct = None
+    cum_pnl = None
+    day_pnl = None
     if g["available"] and grams > 0:
-        market_value = round(g["price"] * grams, 2)
-        cost = round(cost_price * grams, 2)
-        pnl = round(market_value - cost, 2)
-        pnl_pct = round(pnl / cost * 100, 2) if cost else 0
-    else:
-        market_value = None
-        cost = round(cost_price * grams, 2)
-        pnl = None
-        pnl_pct = None
+        gp = _gold_position(g=g)          # 与持仓明细实物黄金卡片完全同源（含手动编辑）
+        if gp is None:                     # 防御兜底：按未编辑口径计算（理论不可达）
+            market_value = round(g["price"] * grams, 2)
+            pnl = round(market_value - cost, 2)
+            pnl_pct = round(pnl / cost * 100, 2) if cost else 0
+            cum_pnl = round(rpnl + pnl, 2)
+        else:
+            market_value = gp["market_value"]
+            pnl = gp["holdingPnl"]         # 持仓盈亏（编辑后口径）
+            pnl_pct = gp["holdingPnlPct"]
+            cum_pnl = gp["cumPnl"]         # 累计盈亏 = 编辑基准/已实现 + 实时持仓收益
+        prev_gold = _au0_prev_close()
+        if prev_gold and prev_gold > 0:
+            # 当日盈亏：实时金价估值口径，与总览「当日收益」卡片实物黄金一致
+            day_pnl = round(g["price"] * grams - prev_gold * grams, 2)
     return ok({
         "grams": grams,
         "cost_price": cost_price,
@@ -607,12 +661,16 @@ def gold_holding():
         "price_available": g["available"],
         "price_name": g["name"],
         "price_pct": g["pct"],
-        "price_asof": g.get("asof", ""),  # 金价最后更新时间（如 2026-08-24 15:00）
+        "price_asof": g.get("asof", ""),  # 金价最后更新时间（如 2026-09-04 11:30）
+        "price_trade_status": (sess or {}).get("status"),  # 当前交易状态（交易中/午间休市…）
+        "price_hours_hint": (sess or {}).get("hint"),      # 该金价源完整交易时段说明
         "market_value": market_value,
         "cost": cost,
         "pnl": pnl,
         "pnl_pct": pnl_pct,
-        "realized_pnl": db.compute_gold_realized_pnl(),  # 已实现收益（卖出流水累计）
+        "realized_pnl": rpnl,            # 已实现收益（卖出流水累计）
+        "cum_pnl": cum_pnl,              # 累计盈亏（与持仓明细同源，含手动编辑）
+        "day_pnl": day_pnl,              # 当日盈亏（克数×(今价−沪金AU0昨收)）
         "updated_at": holding["updated_at"],
     })
 
@@ -886,13 +944,15 @@ def _apply_profit_overrides(p, overrides, holding_pnl, holding_pnl_pct, cum_pnl)
     p["pnl_pct"] = p["holdingPnlPct"]
 
 
-def _gold_position(realized=None, overrides=None):
-    """构造实物黄金持仓条目。金价不可用返回 None。"""
+def _gold_position(realized=None, overrides=None, g=None):
+    """构造实物黄金持仓条目。金价不可用返回 None。
+    g 可选：调用方已取到的实时金价 dict（避免重复请求）；缺省内部获取。"""
     holding = db.get_gold_holding()
     grams = holding["grams"]
     if grams <= 0:
         return None
-    g = ds.gold_cn_price()
+    if g is None:
+        g = ds.gold_cn_price()
     if not g["available"]:
         return None
     cost_price = holding["cost_price"]
@@ -1079,6 +1139,283 @@ def _positions_data():
     if gold:
         pos.append(gold)
     return pos
+
+
+# =========================================================
+# 当日收益（总览卡片，v32）
+# =========================================================
+# 口径（已与用户确认）：实时行情口径 —— 当日收益 = 数量 × (现价 − 昨收基准价)，
+# 覆盖 A股/港股/美股/基金/实物黄金等全部持仓。昨日基准：
+#   - 股票/指数等：行情源昨收（prev）；
+#   - 基金：官方净值已更新到今天 → 用官方昨净值（真实）；官方当日未更新（盘中）
+#      → 用新浪 fu_ 估算净值 − 昨官方净值，并标记 estimated=True（估算）；
+#   - 实物黄金：昨收金价取 AU0(沪金) 日K前一交易日收盘（真实日K）。
+# 行情不可用的持仓不参与加总，计入 missing 列表并提示，绝不填充虚拟数据。
+# 当日涨跌幅：股票/指数用行情源 pct；基金/黄金按 (今价−昨收)/昨收 自算。
+def _day_prev_quote(sym):
+    """取单个新浪行情（含昨收），失败返回 None。"""
+    try:
+        q = ds.sina_quotes([sym]).get(sym)
+        return q if q and q.get("price") else None
+    except ds.DataSourceError:
+        return None
+
+
+def _au0_prev_close(today=None):
+    """沪金 AU0 日K 前一交易日收盘价（实物黄金「昨收/当日盈亏」基准，元/克）。
+    返回最后一根为前收；若最后一根恰为今日（盘中已出现今日K线，极少）则退取上一根。
+    取不到返回 None——绝不用虚拟价。"""
+    if today is None:
+        today = db.today_str()
+    try:
+        gk = ds.sina_futures_kline("AU0", count=3)
+        gdates = gk.get("dates") or []
+        gohlc = gk.get("ohlc") or []
+        if not gdates or not gohlc:
+            return None
+        idx = len(gdates) - 1
+        if gdates[idx] == today and idx >= 1:
+            idx -= 1
+        return gohlc[idx][1]
+    except ds.DataSourceError:
+        return None
+
+
+def _gold_session_status(g, now=None):
+    """国内金价当前交易状态（北京时间，按当前实际金价源 src 的时段表判定）。
+    g 为 ds.gold_cn_price() 返回 dict（含 src）。返回 {"status","hint"}；价不可用返回 None。
+    周末判定休市；法定节假日无法自动区分 → hint 注明以交易所公告为准（绝不虚报行情）。"""
+    if not g.get("available"):
+        return None
+    src = g.get("src") or "FUT_AU0"
+    if now is None:
+        now = datetime.now()
+    m = now.hour * 60 + now.minute   # 0-1439，北京时间
+    wd = now.weekday()               # 0=周一 … 6=周日
+    if src == "SGE_AU9999":
+        # 上金所 Au99.99 现货：日盘 09:00-11:30 / 13:30-15:30；夜盘 20:00-次日 02:30
+        segs = [
+            (540, 690, "交易中（日盘）"),
+            (690, 810, "午间休市 · 13:30 恢复"),
+            (810, 930, "交易中（日盘）"),
+            (930, 1200, "日盘已收盘 · 夜盘 20:00 开盘"),
+        ]
+        night_start, night_label = 1200, "交易中（夜盘）"
+        hint = ("Au99.99（上海黄金交易所现货）交易时段：日盘 09:00-11:30 / 13:30-15:30；"
+                "夜盘 20:00-次日 02:30。周末及法定节假日休市，以交易所公告为准。")
+    else:
+        # 沪金连续（上期所黄金期货，当前实际源）：日盘 09:00-10:15 / 10:30-11:30 / 13:30-15:00；夜盘 21:00-次日 02:30
+        segs = [
+            (540, 615, "交易中（日盘）"),
+            (615, 630, "小节休市 · 10:30 恢复"),
+            (630, 690, "交易中（日盘）"),
+            (690, 810, "午间休市 · 13:30 恢复"),
+            (810, 900, "交易中（日盘）"),
+            (900, 1260, "日盘已收盘 · 夜盘 21:00 开盘"),
+        ]
+        night_start, night_label = 1260, "交易中（夜盘）"
+        hint = ("沪金连续（上期所黄金期货）交易时段：日盘 09:00-10:15 / 10:30-11:30 / 13:30-15:00；"
+                "夜盘 21:00-次日 02:30。周末及法定节假日休市，以交易所公告为准。")
+    # 凌晨 00:00-02:30 归前一晚夜盘：仅当「前一自然日为周一~周五」才在交易（周二~周六凌晨）
+    if wd in (1, 2, 3, 4, 5) and m < 150:
+        return {"status": night_label, "hint": hint}
+    if m >= night_start and wd <= 4:   # 当晚夜盘（周一~周五晚开盘，含周五深夜段）
+        return {"status": night_label, "hint": hint}
+    if wd >= 5:
+        return {"status": "周末休市", "hint": hint}
+    for a, b, label in segs:           # 周一~周五日盘/收盘窗口
+        if a <= m < b:
+            return {"status": label, "hint": hint}
+    return {"status": "休市", "hint": hint}
+
+
+def _fund_nav_pair(fcode):
+    """基金官方净值相邻对（昨官方净值, 今官方净值）。
+    返回 (nav_prev, nav_today, is_today_official)：
+      - 官方 NAV 最后一条日期==今天 → (昨日官方, 今日官方, True)
+      - 官方 NAV 最后一条日期<今天（盘中未更新）→ (昨官方, None, False)
+      - 取不到 → (None, None, False)
+    """
+    try:
+        fk = ds.fund_kline(fcode, count=2)
+    except ds.DataSourceError:
+        return (None, None, False)
+    dates = fk.get("dates") or []
+    ohlc = fk.get("ohlc") or []
+    if len(dates) < 1 or len(ohlc) < 1:
+        return (None, None, False)
+    nav_prev = ohlc[-1][1] if len(ohlc) >= 1 else None          # 官方最新（昨/历史最近）
+    nav_today = ohlc[-1][1]
+    is_today = dates[-1] == db.today_str()
+    if is_today and len(ohlc) >= 2:
+        nav_prev = ohlc[-2][1]                                   # 官方今日已更新 → 昨日官方
+    elif not is_today:
+        nav_today = None                                         # 盘中，官方今日未出
+    return (nav_prev, nav_today, is_today)
+
+
+@app.get("/api/portfolio/day-pnl")
+def portfolio_day_pnl():
+    """当日收益（实时行情口径）：各持仓 数量×(现价−昨收基准) 求和。
+    返回 {date, total, count_ok, count_missing, estimated, details[], missing[], note}：
+      details: [{market,code,name,quantity,price,prev,pct,pnl,estimated,note}]
+      missing: [{market,code,name,reason}]
+    正收益红 / 负收益绿由前端按 pnl 符号着色。缺失项绝不填充虚拟值。"""
+    data = _positions_data()
+    today = db.today_str()
+    # 1) 统一收集：过滤已清仓（sold_out）与行情明确不可用的
+    rows = []        # (p, sym) 股票类
+    fund_rows = []   # (p, fcode) 基金
+    gold_pos = None  # 实物黄金持仓
+    for p in data:
+        if p.get("sold_out"):
+            continue  # 已清仓无当日收益
+        if p.get("is_physical_gold"):
+            gold_pos = p
+            continue
+        mkt = p.get("market")
+        code = p.get("code")
+        if not code:
+            continue
+        if mkt == "FUND":
+            fund_rows.append((p, re.sub(r'^fu_', '', str(code))))
+        else:
+            try:
+                rows.append((p, ds.to_sina_symbol(mkt, code)))
+            except Exception:
+                rows.append((p, str(code)))
+    # 2) 股票/指数类：批量新浪行情（一次请求）
+    syms = [sym for (_, sym) in rows]
+    quotes = {}
+    if syms:
+        try:
+            quotes = ds.sina_quotes(syms)
+        except ds.DataSourceError:
+            quotes = {}
+    # 3) 逐项计算当日收益
+    details = []
+    missing = []
+    total = 0.0
+    estimated_flag = False
+
+    def add_detail(p, price, prev, pct, pnl, estimated, note=""):
+        nonlocal total, estimated_flag
+        if pnl is None or price is None or prev is None:
+            return False
+        pnl = round(pnl, 2)
+        pct = round(pct, 2) if pct is not None else None
+        details.append({
+            "market": p.get("market"), "code": p.get("code"),
+            "name": p.get("name") or p.get("code"),
+            "quantity": p.get("quantity"),
+            "price": round(price, 4), "prev": round(prev, 4),
+            "pct": pct, "pnl": pnl, "estimated": bool(estimated),
+            "note": note,
+        })
+        if estimated:
+            estimated_flag = True
+        total += pnl
+        return True
+
+    # ---- 股票/指数等 ----
+    for (p, sym) in rows:
+        q = quotes.get(sym)
+        name = p.get("name") or p.get("code")
+        if not q or not q.get("price"):
+            missing.append({"market": p.get("market"), "code": p.get("code"),
+                            "name": name, "reason": "实时行情数据暂不可用"})
+            continue
+        price = q["price"]
+        prev = q.get("prev") or 0
+        if prev <= 0:
+            missing.append({"market": p.get("market"), "code": p.get("code"),
+                            "name": name, "reason": "无昨收基准价（新股/停牌等），当日收益无法计算"})
+            continue
+        qty = p.get("quantity") or 0
+        if qty <= 0:
+            continue
+        pnl = qty * (price - prev)
+        # 涨跌幅优先取行情源 pct；无则自算
+        pct = q.get("pct")
+        if pct is None:
+            pct = (price - prev) / prev * 100
+        # src_date 非今日 → 该标的最新行情为最近交易日（休市/收盘），note 说明
+        src_date = q.get("src_date", "")
+        note = ""
+        if src_date and src_date.replace("/", "-")[:10] != today:
+            note = "最新行情为 %s（最近交易日）" % src_date.replace("/", "-")[:10]
+        add_detail(p, price, prev, pct, pnl, False, note)
+
+    # ---- 基金：官方净值优先，盘中用新浪估算（标记估算）----
+    for (p, fcode) in fund_rows:
+        name = p.get("name") or p.get("code")
+        qty = p.get("quantity") or 0
+        if qty <= 0:
+            continue
+        nav_prev, nav_today, is_official_today = _fund_nav_pair(fcode)
+        if is_official_today and nav_prev is not None:
+            # 官方今日净值已更新 → 真实当日收益
+            price = nav_today
+            prev = nav_prev
+            pnl = qty * (price - prev)
+            pct = (price - prev) / prev * 100 if prev else 0
+            add_detail(p, price, prev, pct, pnl, False, "官方净值")
+            continue
+        # 官方当日未更新（盘中/净值未出）→ 新浪 fu_ 估算净值
+        fq = _day_prev_quote("fu_" + str(fcode))
+        if not fq:
+            missing.append({"market": "FUND", "code": p.get("code"),
+                            "name": name,
+                            "reason": "官方净值今日未更新且估算净值暂不可用（收盘后自动更新）"})
+            continue
+        price = fq["price"]
+        prev = nav_prev if nav_prev is not None else (fq.get("prev") or 0)
+        if prev <= 0:
+            missing.append({"market": "FUND", "code": p.get("code"), "name": name,
+                            "reason": "无昨净值基准，当日收益无法计算"})
+            continue
+        pnl = qty * (price - prev)
+        pct = fq.get("pct")
+        if pct is None:
+            pct = (price - prev) / prev * 100
+        add_detail(p, price, prev, pct, pnl, True, "盘中估算（官方净值收盘后更新）")
+
+    # ---- 实物黄金：今价(实时国内金价) − 昨收(AU0 日K前收) ----
+    if gold_pos:
+        name = gold_pos.get("name") or "实物黄金（沪金）"
+        grams = gold_pos.get("quantity") or 0
+        g = ds.gold_cn_price()
+        if not (g["available"] and grams > 0):
+            missing.append({"market": "GOLD", "code": "GOLD_PHYSICAL", "name": name,
+                            "reason": "实时国内金价暂不可用"})
+        else:
+            prev_gold = _au0_prev_close(today)
+            if not prev_gold or prev_gold <= 0:
+                missing.append({"market": "GOLD", "code": "GOLD_PHYSICAL", "name": name,
+                                "reason": "昨收金价暂不可用（金价日K缺失）"})
+            else:
+                price = g["price"]
+                pnl = grams * (price - prev_gold)
+                pct = (price - prev_gold) / prev_gold * 100
+                add_detail(gold_pos, price, prev_gold, pct, pnl, False,
+                           "昨收取沪金AU0日K前收")
+
+    details.sort(key=lambda x: x["pnl"], reverse=True)
+    note = ""
+    if estimated_flag:
+        note += "含 %d 项基金盘中估算" % sum(1 for d in details if d["estimated"])
+    if missing:
+        note += ("；" if note else "") + "%d 项行情缺失未计入" % len(missing)
+    return ok({
+        "date": today,
+        "total": round(total, 2) if details else None,
+        "count_ok": len(details),
+        "count_missing": len(missing),
+        "estimated": estimated_flag,
+        "details": details,
+        "missing": missing,
+        "note": note,
+    })
 
 
 def _auto_pnl_for(mkt, code):

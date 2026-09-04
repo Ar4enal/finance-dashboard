@@ -479,18 +479,24 @@ export default function Positions() {
             </div>
             {p.data_available === false
               ? <div className="empty" style={{ margin: '8px 0' }}>实时行情数据暂不可用</div>
-              : p.sold_out ? (
-                <div className="big" style={{ color: 'var(--muted)' }}>已清仓</div>
-              ) : <>
-                  <div className={`big ${cls(p.pnl)}`}>{sign(p.pnl)}</div>
-                  <div style={{ color: 'var(--muted)', fontSize: 12 }}>{sign(p.pnl_pct)}%</div>
-                </>}
+              : (
+                /* v32：持仓卡片收益区两栏并列 —— 左「当前持仓收益」+涨跌幅%，右「累计收益」+构成说明，文字区分两种收益类型 */
+                <div className="pos-pnl">
+                  <div className="pos-pnl-item">
+                    <div className="pos-pnl-label">当前持仓收益</div>
+                    <div className={`pos-pnl-val ${cls(p.pnl)}`}>{sign(p.sold_out ? 0 : p.pnl)}</div>
+                    <div className="pos-pnl-sub">{p.sold_out ? '已清仓 · 无当前持仓' : `${sign(p.pnl_pct)}%`}</div>
+                  </div>
+                  <div className="pos-pnl-item">
+                    <div className="pos-pnl-label">累计收益</div>
+                    <div className={`pos-pnl-val ${cls(p.cumPnl)}`}>{sign(p.cumPnl)}</div>
+                    <div className="pos-pnl-sub">{p.cumPnlEdited ? '已手动编辑' : (p.sold_out ? '全部已实现收益' : '含已实现收益')}</div>
+                  </div>
+                </div>
+              )}
             <div className="pos-row"><span>数量</span><b>{p.sold_out ? '—' : fmt(p.quantity, p.is_physical_gold ? 2 : 0)}</b></div>
             <div className="pos-row"><span>持仓成本</span><b>{p.sold_out ? '—' : money(p.cost)}</b></div>
             <div className="pos-row"><span>现价 / 市值</span><b>{p.sold_out ? <span className="muted">— / —</span> : (p.data_available === false ? <span className="muted">— / —</span> : `${pfmt(p.price, p.market)} / ${money(p.market_value)}`)}</b></div>
-            {p.sold_out && (
-              <div className="pos-row"><span>累计收益</span><b className={cls(p.cumPnl)}>{sign(p.cumPnl)}</b></div>
-            )}
           </div>
         ))}
       </div>

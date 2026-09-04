@@ -300,12 +300,12 @@ def sina_quotes(symbols):
         elif sym.startswith("hf_") or sym.startswith("nf_"):
             # 黄金各品种字段结构不同，针对性解析
             if sym.startswith("nf_"):
-                # 沪金连续 nf_AU0: [0]=名称(黄金连续) [4]=昨结? [6]=现价
-                # 字段: 名称,时间?,开?,最高?,最低?,昨收?,现价,...
+                # 沪金连续 nf_AU0: [0]=名称 [1]=时间(如113000) [2]=今开 [3]=最高
+                # [4]=最低 [6]=现价 [17]=日期 [27]=昨结算(涨跌幅基准)
+                # v32fix：昨收基准此前误取 [5](恒0) → 沪金涨跌幅恒 0；改用 [27] 昨结算价
                 name = f[0] if f else sym
-                # 寻找价格：沪金现价在 index 6
                 price = _float(f[6]) if len(f) > 6 else _float(f[4]) if len(f) > 4 else 0
-                prev = _float(f[5]) if len(f) > 5 else 0
+                prev = _float(f[27]) if len(f) > 27 else 0
             else:
                 # 纽约金 hf_GC / 伦敦金 hf_XAU: [0]=价格, [13]=名称
                 price = _float(f[0]) if f else 0
@@ -384,7 +384,8 @@ def gold_cn_price():
     """
     获取实时国内黄金价格（元/克）。返回 dict:
       {"price": float(元/克), "name": str, "pct": float,
-       "asof": "YYYY-MM-DD HH:MM" 最后价格时间, "available": bool}
+       "asof": "YYYY-MM-DD HH:MM" 最后价格时间, "available": bool,
+       "src": "SGE_AU9999" | "FUT_AU0"（当前实际使用源，供交易时段提示）}
     v23：先判断是否可以获取到沪金 au9999（SGE Au99.99 现货）数据；
     可以则国内金价使用 au9999 价格，否则回退沪金连续（nf_AU0）。
     两者均失败返回 available=False（绝不返回虚拟价格）。
@@ -392,9 +393,12 @@ def gold_cn_price():
     # 先判断 au9999 是否可取到
     au = _gold_price_for_symbol(GOLD_CN_SYMBOL_AU9999)
     if au["available"]:
+        au["src"] = "SGE_AU9999"
         return au
     # au9999 不可用 → 回退沪金连续（上期所黄金期货）
-    return _gold_price_for_symbol(GOLD_CN_SYMBOL_LEGACY)
+    legacy = _gold_price_for_symbol(GOLD_CN_SYMBOL_LEGACY)
+    legacy["src"] = "FUT_AU0"
+    return legacy
 
 
 def gold_kline_symbol():

@@ -43,7 +43,7 @@ const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
 
 // v31：指数卡片迷你分时小图（SVG polyline，涨红跌绿按最新价 vs 昨收）
 // 数据来自 /api/kline/intraday/batch（腾讯当日实时 / 东财最近交易日 / 本地跟踪文件）
-function IndexSpark({ spark }) {
+function IndexSpark({ spark, tracking }) {
   const UP = '#f85149'
   const DOWN = '#3fb950'
   const MUTED = '#8b949e'
@@ -54,7 +54,9 @@ function IndexSpark({ spark }) {
     const tip = (note || '分时数据暂不可用') + (trade_date ? '（数据日期 ' + trade_date + '）' : '')
     return (
       <div className="idx-spark" title={tip} style={{ marginTop: 6, height: h, display: 'flex', alignItems: 'center', fontSize: 10, color: MUTED }}>
-        <span style={{ border: '1px dashed rgba(139,148,158,.5)', borderRadius: 4, padding: '1px 8px', opacity: .8 }}>分时·暂无（每交易日自动记录）</span>
+        <span style={{ border: '1px dashed rgba(139,148,158,.5)', borderRadius: 4, padding: '1px 8px', opacity: .8 }}>
+          {tracking ? '分时·记录中（系统每分钟记录当日实时价，满2点显示）' : '分时·暂无（每交易日自动记录）'}
+        </span>
       </div>
     )
   }
@@ -450,9 +452,15 @@ export default function Quotes() {
             更新 {gold.price_asof}
           </span>
         )}
+        {gold && gold.price_available && gold.price_trade_status && (
+          <span className="gold-session" title={gold.price_hours_hint || ''}>{gold.price_trade_status}</span>
+        )}
         {gold && gold.grams > 0 && (
           <span style={{ color: 'var(--muted)', marginLeft: 14, fontSize: 13 }}>
-            实物黄金 {fmt(gold.grams, 2)} 克 · 市值 {gold.market_value != null ? money(gold.market_value) : '—'} · 盈亏 {gold.pnl != null ? sign(gold.pnl) : '—'}
+            实物黄金 {fmt(gold.grams, 2)} 克 · 市值 {gold.market_value != null ? money(gold.market_value) : '—'} · 持仓盈亏{' '}
+            <b className={cls(gold.pnl)}>{gold.pnl != null ? sign(gold.pnl) : '—'}</b> · 累计盈亏{' '}
+            <b className={cls(gold.cum_pnl)}>{gold.cum_pnl != null ? sign(gold.cum_pnl) : '—'}</b> · 当日盈亏{' '}
+            <b className={cls(gold.day_pnl)}>{gold.day_pnl != null ? sign(gold.day_pnl) : '—'}</b>
           </span>
         )}
       </div>
@@ -500,7 +508,7 @@ export default function Quotes() {
                   : <>
                       <div className={`ic-value ${cls(q?.chg)}`}>{fmt(q?.price)}</div>
                       <div className={`ic-pct ${cls(q?.chg)}`}>{sign(q?.chg)} ({sign(q?.pct)}%)</div>
-                      <IndexSpark spark={sparkMap[`${idx.market}:${idx.code}`] || sparkMap[`${idx.market}:${idx.code.toLowerCase()}`]} />
+                      <IndexSpark spark={sparkMap[`${idx.market}:${idx.code}`] || sparkMap[`${idx.market}:${idx.code.toLowerCase()}`]} tracking={idx.market === 'GOLD'} />
                     </>}
                 <div className="ic-mark">{idx.code} · 点击看K线</div>
               </div>

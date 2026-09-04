@@ -64,6 +64,10 @@ def in_trade_window(market, date_str, hhmm):
     """是否处于该市场可采样交易时段（交易时段硬窗口 + 交易日近似）。"""
     m = ds.normalize_market(market)
     t = int(hhmm)
+    if m == "GOLD":
+        # 黄金（期货指数：纽约金/伦敦金≈24h、沪金日盘+夜盘）：按北京自然日连续窗口，
+        # 由 sample_once 的「价格变动即记、长期横盘休眠」控制实际落点，休市/无行情自然不记录。
+        return True
     if m == "A":
         if not (915 <= t <= 1505):
             return False
@@ -150,7 +154,8 @@ def read_local(market, code):
 # 采样
 # ---------------------------------------------------------------
 def _prev_close_of(market, code, quotes):
-    """从新浪报价取昨收（优先 prev 字段；无则用现价与涨跌幅反推）。"""
+    """从新浪报价取昨收（优先 prev 字段；无则用现价与涨跌幅反推；
+    黄金品种新浪仍不带昨收时（如沪金 nf_AU0 prev=0），用同品种新浪期货日K前一交易日收盘兜底）。"""
     m = ds.normalize_market(market)
     sym = ds.to_sina_symbol(m, code)
     q = quotes.get(sym) or {}
@@ -159,6 +164,22 @@ def _prev_close_of(market, code, quotes):
     price, pct = q.get("price"), q.get("pct")
     if price and pct is not None and pct != 0:
         return round(price / (1 + pct / 100.0), 4)
+    if m == "GOLD":
+        fsym = {"nf_AU0": "AU0", "AU0": "AU0", "GOLD_PHYSICAL": "AU0",
+                "hf_GC": "GC0", "hf_XAU": "XAUUSD"}.get(str(code))
+        if fsym:
+            try:
+                k = ds.sina_futures_kline(fsym, count=3)
+                dates, ohlc = k.get("dates") or [], k.get("ohlc") or []
+                if dates and ohlc:
+                    idx = len(dates) - 1
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    if str(dates[idx]).startswith(today) and idx >= 1:
+                        idx -= 1
+                    if idx >= 0 and len(ohlc[idx]) >= 2:
+                        return ohlc[idx][1]
+            except Exception:
+                return None
     return None
 
 
@@ -197,22 +218,22 @@ def sample_once(market, code):
         # 新的交易日 → 重置
         f = {"trade_date": date_str, "prev_close": prev_close, "points": []}
     pts = f.get("points") or []
-    # 平线抑制
-    if pts:
-        last_p = pts[-1].get("price")
-        if abs(last_p - price) < 1e-9:
-            # 找最近价格变化时刻
-            change_t = pts[0].get("t")
-            for pt in reversed(pts):
-                if abs(pt.get("price") - price) >= 1e-9:
-                    change_t = pt.get("t")
-                    break
-            try:
-                last_change = datetime.strptime(change_t, "%Y-%m-%d %H:%M")
-            except Exception:
-                last_change = None
-            if last_change and (datetime.now() - last_change).total_seconds() < 3600:
-                return False  # 60 分钟内价格未变 → 视为非活跃交易
+    # 平线抑制：现价与末点相同时——
+    #   - 若距上次价格变化 < 15 分钟（真实交易中的短暂横盘）→ 继续落同价点，保持时间轴连续；
+    #   - 若已 ≥ 15 分钟无变化（午休/收盘/休市/停牌）→ 休眠不落点，防止产生大段无效平线。
+    #   （黄金为近 24h 品种，无交易日窗口硬限制，此休眠是避免午休/凌晨等无行情时段刷平点的关键。）
+    if pts and abs(pts[-1].get("price") - price) < 1e-9:
+        change_t = pts[0].get("t")
+        for pt in reversed(pts):
+            if abs(pt.get("price") - price) >= 1e-9:
+                change_t = pt.get("t")
+                break
+        try:
+            last_change = datetime.strptime(change_t, "%Y-%m-%d %H:%M")
+        except Exception:
+            last_change = None
+        if not last_change or (datetime.now() - last_change).total_seconds() >= 900:
+            return False  # 15 分钟无价格变化 → 视为非活跃，休眠
     # 同分钟覆盖 / 跨分钟追加
     if pts and pts[-1].get("t", "")[:16] == now_s[:16]:
         pts[-1]["price"] = round(price, 4)

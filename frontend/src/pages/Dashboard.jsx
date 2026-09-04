@@ -46,18 +46,27 @@ export default function Dashboard() {
   const [positions, setPositions] = useState([])
   const [pnlOffset, setPnlOffset] = useState(0)  // 持仓盈亏分布：滑块窗口偏移（窗口大小 10）
   const [pnlDetail, setPnlDetail] = useState(null)  // 总览卡片详情弹窗 {kind, title, data}
+  const [dayPnl, setDayPnl] = useState(null)  // v32 当日收益卡片数据
+  const [showDayPnl, setShowDayPnl] = useState(false)  // v32 当日收益明细弹窗
   const refreshSec = useContext(RefreshContext)
   const { openKline } = useKline()
 
   const load = () => {
     api.portfolioSummary().then(setSummary).catch(() => {})
     api.positions().then(setPositions).catch(() => {})
+    api.dayPnl().then(setDayPnl).catch(() => {})  // v32：当日收益（实时行情口径）
   }
 
   // 总览卡片点击 → 查看近一个月收益折线图（v26）
   const openPnlDetail = (kind) => {
     const title = kind === 'holding' ? '当前持仓收益 · 近一个月走势' : '累计收益 · 近一个月走势'
     api.pnlSeries(30, kind).then(d => setPnlDetail({ kind, title, data: d })).catch(() => setPnlDetail(null))
+  }
+
+  // v32：当日收益卡片点击 → 刷新一次并打开明细弹窗
+  const openDayPnl = () => {
+    setShowDayPnl(true)
+    api.dayPnl().then(setDayPnl).catch(() => {})
   }
 
   useEffect(() => {
@@ -96,6 +105,17 @@ export default function Dashboard() {
       <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
         <div className="stat"><div className="label">总资产</div><div className="value">{money(summary?.totalMarketValue)}</div></div>
         <div className="stat"><div className="label">总成本</div><div className="value">{money(summary?.totalCost)}</div></div>
+        {/* v32：当日收益卡片（总成本与当前持仓收益之间）。实时行情口径，正红负绿，点击查看各产品明细 */}
+        <div className="stat" style={{ cursor: 'pointer' }} title="当日收益 = Σ（各持仓 现价−昨收）×数量；基金净值未更新时为盘中估算。点击查看每个产品当日收益明细"
+          onClick={openDayPnl}>
+          <div className="label">当日收益 <span style={{ color: 'var(--accent)', fontSize: 12 }}>☀️</span></div>
+          <div className={`value ${cls(dayPnl?.total)}`}>{sign(dayPnl?.total)}</div>
+          <div className="sub" style={{ fontSize: 11 }}>
+            {dayPnl
+              ? `${dayPnl.count_ok} 项已计` + (dayPnl.estimated ? ' · 含估算' : '') + (dayPnl.count_missing ? ` · ${dayPnl.count_missing} 项缺失` : '')
+              : '加载中…'}
+          </div>
+        </div>
         <div className="stat" style={{ cursor: 'pointer' }} title="点击查看近一个月收益走势" onClick={() => openPnlDetail('holding')}>
           <div className="label">当前持仓收益 <span style={{ color: 'var(--accent)' }}>📈</span></div>
           <div className={`value ${cls(summary?.totalHoldingPnl)}`}>{sign(summary?.totalHoldingPnl)}</div>
@@ -191,6 +211,63 @@ export default function Dashboard() {
                     <div className="pnl-series-foot">最右为当前日期（{pnlDetail.data.latest_date}）；拖动下方滑块或滚轮可向左滑动查看更早记录。</div>
                   </>
                 : <div className="empty">暂无收益记录（组合分析页需积累至少 2 天快照）</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* v32：当日收益明细弹窗（每个产品当日收益列表；缺失项提示不计入） */}
+      {showDayPnl && (
+        <div className="alloc-modal-mask" onClick={() => setShowDayPnl(false)}>
+          <div className="modal-card" style={{ width: 'min(680px, 94vw)' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <span>当日收益明细 · {dayPnl?.date || ''}</span>
+              <button className="modal-close" onClick={() => setShowDayPnl(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              {dayPnl && dayPnl.total != null && (
+                <div className="day-pnl-total">
+                  当日收益合计 <span className={cls(dayPnl.total)} style={{ fontWeight: 700 }}>{sign(dayPnl.total)}</span>
+                  {dayPnl.estimated && <span className="day-pnl-est" title="官方净值今日未更新，基金当日收益为盘中估算">含估算</span>}
+                </div>
+              )}
+              {!dayPnl || (dayPnl.details.length === 0 && dayPnl.missing.length === 0)
+                ? <div className="empty">暂无持仓或当日收益数据</div>
+                : <>
+                    {dayPnl.details.length > 0 && (
+                      <table className="day-pnl-table">
+                        <thead>
+                          <tr><th>产品</th><th className="num">当日涨跌</th><th className="num">当日收益</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                          {dayPnl.details.map((d, i) => (
+                            <tr key={d.market + ':' + d.code + i}>
+                              <td>
+                                <div className="name">{d.name || d.code}</div>
+                                <div className="code">{d.market} · {d.code}{d.note ? ` · ${d.note}` : ''}</div>
+                              </td>
+                              <td className={`num ${cls(d.pct)}`}>{sign(d.pct)}%</td>
+                              <td className={`num ${cls(d.pnl)}`} style={{ fontWeight: 600 }}>{sign(d.pnl)}</td>
+                              <td className="num">{d.estimated ? <span className="day-pnl-est" title="官方净值今日未更新，为盘中估算">估算</span> : null}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    {dayPnl.missing.length > 0 && (
+                      <div className="day-pnl-missing">
+                        <b>⚠️ {dayPnl.missing.length} 项未计入当日收益：</b>
+                        {dayPnl.missing.map((m, i) => (
+                          <div key={m.market + ':' + m.code + i} className="m-item">
+                            {m.name || m.code}（{m.market}）— {m.reason}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="pnl-series-foot" style={{ marginTop: 10 }}>
+                      口径：当日收益 = 数量 ×（现价 − 昨收基准）；股票/指数取行情昨收，基金官方净值今日未更新时用新浪估算净值（标注"估算"），实物黄金昨收取沪金AU0日K前收。数据均来自真实行情源，缺失项未计入、绝不填充虚拟值。
+                    </div>
+                  </>}
             </div>
           </div>
         </div>
