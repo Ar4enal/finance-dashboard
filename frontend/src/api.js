@@ -96,6 +96,8 @@ export const api = {
   // 数据导入导出（跨机器迁移持仓等全部用户数据）
   dataExportInfo: () => request('/api/data/export/info'),
   dataImport: () => request('/api/data/import', { method: 'POST' }),
+  // v33：一键清空全部持仓与交易记录（含收益覆盖/实物黄金/历史快照），可选连自选/指数一起清
+  dataClearAll: (clearWatchlist) => request('/api/data/clear-all?clear_watchlist=' + !!clearWatchlist, { method: 'POST' }),
   // 导出：触发浏览器下载项目根目录生成的 JSON 备份文件
   dataExportDownload: () => {
     const a = document.createElement('a')

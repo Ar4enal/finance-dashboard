@@ -6,6 +6,7 @@
 """
 import re
 import time
+import threading
 from datetime import datetime, timedelta
 import requests
 
@@ -27,6 +28,41 @@ TENCENT_IFZQ = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app"
 
 _session = requests.Session()
 _session.headers.update(SINA_HEADERS)
+
+# ---------------------------------------------------------------
+# v33 性能优化：进程内 TTL 行情缓存
+# ---------------------------------------------------------------
+# 目的：消除"同一次页面加载多个接口重复拉取同一批行情"的浪费。
+# 原则（真实数据不虚构）：缓存的是真实源返回结果，仅短时复用——
+#   - 新浪实时行情（股票/指数/基金估值/黄金）TTL 3s（用户确认）；
+#   - 天天基金官方净值历史（每日收盘后更新一次，盘中不变）TTL 300s（用户确认 5 分钟）。
+# 线程安全：uvicorn 默认单进程多线程，缓存读写须加锁。
+_CACHE = {}                 # key -> (expire_ts, value)
+_CACHE_LOCK = threading.Lock()
+_CACHE_TTL = {
+    "quote": 3,             # 实时行情秒级缓存
+    "fund_nav": 300,        # 基金官方净值 5 分钟缓存（日频数据）
+}
+
+
+def _cache_get(key):
+    with _CACHE_LOCK:
+        item = _CACHE.get(key)
+        if item and item[0] > time.time():
+            return item[1]
+        if item:
+            _CACHE.pop(key, None)
+    return None
+
+
+def _cache_set(key, value, ttl):
+    with _CACHE_LOCK:
+        # 简单容量保护：最多保留 300 个缓存条目
+        if len(_CACHE) >= 300:
+            now = time.time()
+            for k in [k for k, (exp, _) in _CACHE.items() if exp <= now]:
+                _CACHE.pop(k, None)
+        _CACHE[key] = (time.time() + ttl, value)
 
 # ---------------------------------------------------------------
 # QDII（合格境内机构投资者）基金代码库
@@ -250,9 +286,16 @@ def _parse_sina_quote(text):
 #   黄金:     hf_GC(纽约金), nf_AU0(沪金连续), hf_XAU(伦敦金)
 #   基金:     fu_161725
 def sina_quotes(symbols):
-    """批量取新浪报价。symbols: list[str]。返回 {symbol: quote}"""
+    """批量取新浪报价。symbols: list[str]。返回 {symbol: quote}
+    v33：结果做 3 秒 TTL 进程内缓存（同一次页面加载多接口共享同一批行情，
+    消除逐只重复请求；TTL 短于最小前端轮询 5s，不影响数据新鲜度）。"""
     if not symbols:
         return {}
+    # 规范化 key：与顺序无关（新浪一次批量返回与顺序无关）
+    cache_key = ("quote", tuple(sorted(set(symbols))))
+    hit = _cache_get(cache_key)
+    if hit is not None:
+        return hit
     url = "https://hq.sinajs.cn/list=" + ",".join(symbols)
     text = _get(url, headers=SINA_HEADERS, decode="gbk")
     result = {}
@@ -327,6 +370,7 @@ def sina_quotes(symbols):
             src_time = f[31].strip() if len(f) > 31 else ""
             result[sym] = {"name": name, "price": price, "chg": chg, "pct": pct,
                            "prev": prev, "src_date": src_date, "src_time": src_time}
+    _cache_set(cache_key, result, _CACHE_TTL["quote"])  # v33：3s TTL，空结果也缓存（避免反复探测失效代码）
     return result
 
 
@@ -389,15 +433,23 @@ def gold_cn_price():
     v23：先判断是否可以获取到沪金 au9999（SGE Au99.99 现货）数据；
     可以则国内金价使用 au9999 价格，否则回退沪金连续（nf_AU0）。
     两者均失败返回 available=False（绝不返回虚拟价格）。
+    v33：整体做 3s TTL 缓存（内部含两品种探测 + asof 解析多次请求，
+    同一次页面加载多接口共享金价，避免重复探测）。
     """
+    cache_key = ("gold_cn_price",)
+    hit = _cache_get(cache_key)
+    if hit is not None:
+        return hit
     # 先判断 au9999 是否可取到
     au = _gold_price_for_symbol(GOLD_CN_SYMBOL_AU9999)
     if au["available"]:
         au["src"] = "SGE_AU9999"
+        _cache_set(cache_key, au, _CACHE_TTL["quote"])
         return au
     # au9999 不可用 → 回退沪金连续（上期所黄金期货）
     legacy = _gold_price_for_symbol(GOLD_CN_SYMBOL_LEGACY)
     legacy["src"] = "FUT_AU0"
+    _cache_set(cache_key, legacy, _CACHE_TTL["quote"])
     return legacy
 
 
@@ -710,7 +762,14 @@ def sina_futures_kline(symbol, count=120):
 # ---------------------------------------------------------------
 def _fund_net_worth_trend(fund_code):
     """拉取天天基金单位净值历史原始数组。
-    返回 [{x: 时间戳ms, y: 单位净值, equityReturn: 日涨跌%}, ...] 或 None。"""
+    返回 [{x: 时间戳ms, y: 单位净值, equityReturn: 日涨跌%}, ...] 或 None。
+    v33：结果做 300s（5 分钟）TTL 缓存——基金官方净值每日仅收盘后更新一次，
+    盘中不变；缓存避免页面多接口（positions/summary/day-pnl）对同一基金重复拉取。
+    失败（DataSourceError / 无数据）不缓存，下次自动重试。"""
+    cache_key = ("fund_nav", fund_code)
+    hit = _cache_get(cache_key)
+    if hit is not None:
+        return hit
     url = "https://fund.eastmoney.com/pingzhongdata/%s.js" % fund_code
     text = _get(url, headers=EASTMONEY_HEADERS, decode="utf-8")
     m = re.search(r"var Data_netWorthTrend\s*=\s*(\[.*?\]);", text, re.DOTALL)
@@ -721,7 +780,10 @@ def _fund_net_worth_trend(fund_code):
         rows = json.loads(m.group(1))
     except Exception:
         return None
-    return [r for r in rows if r.get("y")]
+    rows = [r for r in rows if r.get("y")]
+    if rows:
+        _cache_set(cache_key, rows, _CACHE_TTL["fund_nav"])
+    return rows
 
 
 def fund_kline(fund_code, count=120):

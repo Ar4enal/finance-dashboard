@@ -7,6 +7,7 @@
 import os
 import re
 import time
+import threading
 from datetime import datetime
 from typing import Optional, List
 
@@ -912,9 +913,51 @@ def update_txn(tid: int, market: Optional[str] = None, code: Optional[str] = Non
     return ok({"id": tid})
 
 
+# ---- v33 性能：_positions_data 进程级 3s 共享缓存 ----
+# 背景：/api/positions、/portfolio/summary、/portfolio/day-pnl、/portfolio/allocation、
+# /portfolio/pnl-series 等都依赖 _positions_data()（内部批量行情 + 基金净值并发拉取）。
+# 总览页一次加载会并行请求多个此类接口 → 各自重复拉同一批行情。
+# 方案：结果进程内缓存 3s（TTL 短于最小前端轮询 5s，不影响数据新鲜度），
+# 所有写请求（POST/PUT/DELETE）响应后统一失效，保证用户改动持仓后立即见新。
+_positions_lock = threading.Lock()
+_positions_cache = {"ts": 0.0, "data": None}
+_POS_CACHE_TTL = 3.0
+
+
+def _positions_data_cached():
+    """_positions_data() 的 3s 共享缓存版（single-flight：并发 miss 只计算一次，
+    其余请求在锁上等待后直接命中同一结果）。调用方只读返回列表，不得修改。"""
+    now = time.time()
+    with _positions_lock:
+        c = _positions_cache
+        if c["data"] is not None and now - c["ts"] < _POS_CACHE_TTL:
+            return c["data"]
+        # miss：锁内计算（含外部行情请求），并行到达的其它请求在此等待后命中本次结果
+        data = _positions_data()
+        _positions_cache["ts"] = time.time()
+        _positions_cache["data"] = data
+        return data
+
+
+def _positions_cache_clear():
+    """持仓/收益/交易等写操作后调用，使下次请求重新计算。"""
+    with _positions_lock:
+        _positions_cache["data"] = None
+
+
+@app.middleware("http")
+async def _clear_positions_cache_on_write(request, call_next):
+    """v33：写请求（新增/修改/删除）响应后失效 _positions_data 结果缓存，
+    保证用户改动持仓后立即可见，无需等待 3s TTL 自然过期。"""
+    response = await call_next(request)
+    if request.method in ("POST", "PUT", "DELETE"):
+        _positions_cache_clear()
+    return response
+
+
 @app.get("/api/positions")
 def positions():
-    return ok(_positions_data())
+    return ok(_positions_data_cached())
 
 
 def _apply_profit_overrides(p, overrides, holding_pnl, holding_pnl_pct, cum_pnl):
@@ -988,7 +1031,7 @@ def _gold_position(realized=None, overrides=None, g=None):
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     # 复用 positions 的计算结果（含用户收益覆盖），保证各界面口径一致
-    data = _positions_data()
+    data = _positions_data_cached()  # v33：3s 共享缓存（并行接口避免重复拉行情）
     total_mv = 0.0
     total_cost = 0.0
     total_holding_pnl = 0.0
@@ -1058,7 +1101,6 @@ def _positions_data():
     realized = db.compute_realized_pnl()
     overrides = db.get_asset_profit_overrides()
     po = db.get_position_overrides()  # {(market,code): {quantity, cost}}
-    # 应用持仓覆盖：用户手动编辑的数量/成本优先于自动聚合
     if po:
         pos_by_key = {(_n(p["market"]), p["code"]): p for p in pos}
         for key, ov in po.items():
@@ -1085,13 +1127,53 @@ def _positions_data():
                         "cost": cost, "overridden": True,
                     }
         pos = list(pos_by_key.values())
+    # ---- v33 性能优化：行情一次批量请求 + 基金官方净值并发拉取 ----
+    # 背景：原实现对每个持仓逐只 sina_quotes + 基金逐个 fund_kline（N 只 = 2N 次串行 HTTP，
+    # 页面并行接口还会各自重复拉同一批）。新浪批量接口支持一次带全部代码（实测 24 只 ≈ 190ms），
+    # 天天基金净值无批量接口 → 并发拉取 + 5 分钟 TTL 缓存（基金净值日频，盘中不变，真实不虚构）。
+    import concurrent.futures as _cf
+    quote_syms = set()
+    fund_codes = {}          # fu_ sym -> 纯基金代码
+    for p in pos:
+        code = p.get("code")
+        if not code or p.get("is_physical_gold"):
+            continue
+        try:
+            sym = ds.to_sina_symbol(ds.normalize_market(p.get("market") or ""), str(code))
+        except Exception:
+            continue
+        quote_syms.add(sym)
+        if p.get("market") == "FUND":
+            fund_codes[sym] = re.sub(r'^fu_', '', str(code))
+    quotes_map = {}
+    bulk_fail = False        # 新浪整体不可用（等价原逐只全部抛 DataSourceError）
+    if quote_syms:
+        try:
+            quotes_map = ds.sina_quotes(sorted(quote_syms))
+        except ds.DataSourceError:
+            bulk_fail = True
+    # 基金官方 NAV 并发预取：值 / EMPTY（官方无数据，保持新浪估算价）/ ERR（源失败→0）
+    nav_map = {}
+    if fund_codes:
+        def _fetch_nav(fc):
+            try:
+                fk = ds.fund_kline(fc, count=1)
+                if fk.get("dates") and fk.get("ohlc"):
+                    return fc, fk["ohlc"][-1][1], "ok"
+                return fc, None, "empty"
+            except ds.DataSourceError:
+                return fc, None, "err"
+        _uniq = sorted(set(fund_codes.values()))
+        with _cf.ThreadPoolExecutor(max_workers=min(8, max(1, len(_uniq)))) as _ex:
+            for fc, nav, st in _ex.map(_fetch_nav, _uniq):
+                nav_map[fc] = (nav, st)
     for p in pos:
         if p.get("sold_out"):
             # 已清仓：不拉行情价格（数量/成本/市值置空），但名称仍需展示真实产品名；
             # 尝试从行情取名称（退市标的取不到则回退代码），与正常持仓的 name 行为一致。
             try:
                 sym = ds.to_sina_symbol(ds.normalize_market(p["market"]), p["code"])
-                q = ds.sina_quotes([sym]).get(sym, {})
+                q = quotes_map.get(sym, {}) if not bulk_fail else {}
                 p["name"] = q.get("name") or p["code"]
             except ds.DataSourceError:
                 p["name"] = p["code"]
@@ -1103,27 +1185,7 @@ def _positions_data():
             _apply_profit_overrides(p, overrides, 0.0, 0.0, rpnl)
             continue
         sym = ds.to_sina_symbol(ds.normalize_market(p["market"]), p["code"])
-        try:
-            quotes = ds.sina_quotes([sym])
-            q = quotes.get(sym, {})
-            price = q.get("price", 0)
-            # 基金：市值用单位净值（NAV）计算，而非盘中实时价（v25 需求3）。
-            # NAV 每日收盘后才更新——取 NAV 最新一条即「当日已更新用当日、否则自动为前一交易日」。
-            if p["market"] == "FUND":
-                import re as _re
-                fcode = _re.sub(r'^fu_', '', str(p["code"]))
-                try:
-                    fk = ds.fund_kline(fcode, count=1)
-                    if fk["dates"] and fk["ohlc"]:
-                        price = fk["ohlc"][-1][1]
-                except ds.DataSourceError:
-                    price = 0  # NAV 取不到则无法计算基金市值
-            mv = price * p["quantity"]
-            holding_pnl = mv - p["cost"]
-            holding_pnl_pct = round(holding_pnl / p["cost"] * 100, 2) if p["cost"] else 0
-            p.update({"name": q.get("name", p["code"]), "price": price,
-                      "market_value": round(mv, 2)})
-        except ds.DataSourceError:
+        if bulk_fail:
             # 行情不可用：市值/现价未知，保持 None（不回退成 cost，否则"按市值"排序
             # 会与"按成本"混同、且会虚增组合总市值）；浮动盈亏无法计算置 0。
             p["price"] = None
@@ -1132,6 +1194,23 @@ def _positions_data():
             holding_pnl_pct = 0.0
             p["data_available"] = False
         else:
+            q = quotes_map.get(sym, {})
+            price = q.get("price", 0)
+            # 基金：市值用单位净值（NAV）计算，而非盘中实时价（v25 需求3）。
+            # NAV 每日收盘后才更新——取 NAV 最新一条即「当日已更新用当日、否则自动为前一交易日」。
+            if p["market"] == "FUND":
+                fcode = re.sub(r'^fu_', '', str(p["code"]))
+                nav, st = nav_map.get(fcode, (None, "err"))
+                if st == "ok":
+                    price = nav
+                elif st == "err":
+                    price = 0  # NAV 取不到则无法计算基金市值
+                # st == "empty"：官方无净值数据，保持新浪估算价（与原实现一致）
+            mv = price * p["quantity"]
+            holding_pnl = mv - p["cost"]
+            holding_pnl_pct = round(holding_pnl / p["cost"] * 100, 2) if p["cost"] else 0
+            p.update({"name": q.get("name", p["code"]), "price": price,
+                      "market_value": round(mv, 2)})
             p["data_available"] = True
         rpnl = realized.get((p["market"], p["code"]), 0.0)
         _apply_profit_overrides(p, overrides, holding_pnl, holding_pnl_pct, rpnl + holding_pnl)
@@ -1261,7 +1340,7 @@ def portfolio_day_pnl():
       details: [{market,code,name,quantity,price,prev,pct,pnl,estimated,note}]
       missing: [{market,code,name,reason}]
     正收益红 / 负收益绿由前端按 pnl 符号着色。缺失项绝不填充虚拟值。"""
-    data = _positions_data()
+    data = _positions_data_cached()  # v33：3s 共享缓存
     today = db.today_str()
     # 1) 统一收集：过滤已清仓（sold_out）与行情明确不可用的
     rows = []        # (p, sym) 股票类
@@ -1347,6 +1426,14 @@ def portfolio_day_pnl():
         add_detail(p, price, prev, pct, pnl, False, note)
 
     # ---- 基金：官方净值优先，盘中用新浪估算（标记估算）----
+    # v33：新浪 fu_ 估算价一次批量预取（避免逐只串行请求；官方净值走 fund_kline 5min 缓存）
+    fund_fu_syms = ["fu_" + str(fc) for (_, fc) in fund_rows]
+    fund_fu_map = {}
+    if fund_fu_syms:
+        try:
+            fund_fu_map = ds.sina_quotes(sorted(set(fund_fu_syms)))
+        except ds.DataSourceError:
+            fund_fu_map = {}
     for (p, fcode) in fund_rows:
         name = p.get("name") or p.get("code")
         qty = p.get("quantity") or 0
@@ -1362,7 +1449,7 @@ def portfolio_day_pnl():
             add_detail(p, price, prev, pct, pnl, False, "官方净值")
             continue
         # 官方当日未更新（盘中/净值未出）→ 新浪 fu_ 估算净值
-        fq = _day_prev_quote("fu_" + str(fcode))
+        fq = fund_fu_map.get("fu_" + str(fcode))
         if not fq:
             missing.append({"market": "FUND", "code": p.get("code"),
                             "name": name,
@@ -1453,7 +1540,7 @@ def portfolio_allocation(by: str = "market"):
     与组合汇总口径一致，保证「新增持仓」录制的资产也能出现在饼图中。
     每项附带 items：该分组下各产品明细（代码/名称/市值/占该分组百分比），
     供前端点击饼图元素弹窗展示。"""
-    pos = _positions_data()
+    pos = _positions_data_cached()  # v33：3s 共享缓存
     groups = {}      # key -> {value, items:[(market,code,name,mv)]}
     for p in pos:
         mv = p.get("market_value") or 0
@@ -1748,7 +1835,7 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
     # v27 修复：用户在 day 视图编辑的「日收益」(pnl_override, pnl_type='day', range_val=日期)
     # 视为该日收益单元的最终值，向上聚合到 month/year/cum，并同步到日历图。
     names = { (p.get("market"), p.get("code")): p.get("name") or p.get("code")
-              for p in _positions_data() }
+              for p in _positions_data_cached() }  # v33：3s 共享缓存
     combo_pnl = 0.0
     pos_pnl = {}  # (market, code) -> 区间内日收益累加
     cal = []      # 每日组合收益（日历图用）
@@ -1892,14 +1979,21 @@ EXPORT_FILENAME = "持仓数据_export.json"
 EXPORT_FILEPATH = os.path.join(_PROJECT_ROOT, EXPORT_FILENAME)
 
 
+def _write_export_payload():
+    """导出全部用户数据并写盘到项目根目录固定名 JSON。返回 payload。
+    v33 起被 /api/data/export（下载）与 /api/data/clear-all（清空后同步 json）共用。"""
+    payload = db.export_all_data()
+    data_str = _json.dumps(payload, ensure_ascii=False, indent=2)
+    with open(EXPORT_FILEPATH, "w", encoding="utf-8") as f:
+        f.write(data_str)
+    return payload
+
+
 @app.get("/api/data/export")
 def data_export():
     """导出全部用户数据为 JSON 文件（写到项目根目录），并供浏览器下载。"""
     try:
-        payload = db.export_all_data()
-        data_str = _json.dumps(payload, ensure_ascii=False, indent=2)
-        with open(EXPORT_FILEPATH, "w", encoding="utf-8") as f:
-            f.write(data_str)
+        payload = _write_export_payload()
         from fastapi.responses import FileResponse
         return FileResponse(
             EXPORT_FILEPATH,
@@ -1955,6 +2049,31 @@ def data_import():
         return fail(str(e))
     except Exception as e:
         return fail("导入失败：%s" % str(e))
+
+
+@app.post("/api/data/clear-all")
+def data_clear_all(clear_watchlist: bool = False):
+    """v33：一键清空全部持仓与交易记录（含收益覆盖/实物黄金/历史快照/置顶），
+    并按用户选择（clear_watchlist）决定是否连自选列表/自选指数一并清空。
+    清空成功后自动同步重写根目录「持仓数据_export.json」，保证本地备份文件与库一致。
+    危险操作：由前端两层确认（第二层需输入「确认清空」关键字）把关。"""
+    try:
+        stat = db.clear_all_positions(clear_watchlist=clear_watchlist)
+        json_ok = True
+        json_err = ""
+        try:
+            _write_export_payload()  # 清空后同步重写导出 json（保留/清空自选随 payload 现状）
+        except Exception as e:
+            json_ok = False
+            json_err = str(e)
+        return ok({
+            "cleared": stat,
+            "clear_watchlist": clear_watchlist,
+            "json_updated": json_ok,
+            "json_err": json_err,
+        })
+    except Exception as e:
+        return fail("一键清空失败：%s" % str(e))
 
 
 # =========================================================

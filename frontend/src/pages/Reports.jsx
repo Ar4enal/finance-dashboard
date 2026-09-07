@@ -9,6 +9,25 @@ const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 export default function Reports() {
   const [positions, setPositions] = useState([])
   const [txns, setTxns] = useState([])
+  // v33 需求3：持仓汇总排序（市值/成本/盈亏/收益率），默认市值降序
+  const [sortKey, setSortKey] = useState('market_value')
+  const [sortDir, setSortDir] = useState('desc')
+  const onSort = (k) => {
+    if (k === sortKey) setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
+    else { setSortKey(k); setSortDir('desc') }
+  }
+  const arrow = (k) => (sortKey === k ? <span className="sort-arr">{sortDir === 'desc' ? '↓' : '↑'}</span> : null)
+  const sortedPositions = useMemo(() => {
+    const arr = [...positions]
+    arr.sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey]
+      if (va == null && vb == null) return 0
+      if (va == null) return 1          // 空值排最后
+      if (vb == null) return -1
+      return (sortDir === 'desc' ? -1 : 1) * (va - vb)
+    })
+    return arr
+  }, [positions, sortKey, sortDir])
   // 交易流水按 市场|代码 映射持仓名称
   const posNameMap = useMemo(() => {
     const m = {}
@@ -48,9 +67,14 @@ export default function Reports() {
       <div className="card">
         <div className="card-title">持仓汇总</div>
         <table>
-          <thead><tr><th>名称</th><th>市场</th><th className="num">数量</th><th className="num">市值</th><th className="num">成本</th><th className="num">盈亏</th><th className="num">收益率</th></tr></thead>
+          <thead><tr><th>名称</th><th>市场</th><th className="num">数量</th>
+            <th className="num sortable" onClick={() => onSort('market_value')} title="点击切换升序 / 降序">市值 {arrow('market_value')}</th>
+            <th className="num sortable" onClick={() => onSort('cost')} title="点击切换升序 / 降序">成本 {arrow('cost')}</th>
+            <th className="num sortable" onClick={() => onSort('pnl')} title="点击切换升序 / 降序">盈亏 {arrow('pnl')}</th>
+            <th className="num sortable" onClick={() => onSort('pnl_pct')} title="点击切换升序 / 降序">收益率 {arrow('pnl_pct')}</th>
+          </tr></thead>
           <tbody>
-            {positions.map(p => (
+            {sortedPositions.map(p => (
               <tr key={p.code} style={{ cursor: 'pointer' }} onClick={() => openKline(p.market, p.code, p.name)}
                 title="点击查看 K 线行情">
                 <td>{p.name || p.code}</td>

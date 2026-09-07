@@ -31,6 +31,16 @@ function buildBarOption(pnl) {
 }
 
 // 收益分析 - 日历图：每日组合收益热力日历
+// v33：每个收益格子上居中显示当天收益数字（红涨绿跌配色由背景热力色承担，白字保证对比度）
+const calLabel = (v) => {
+  if (v == null || isNaN(v)) return ''
+  const a = Math.abs(v)
+  if (a < 0.5) return '0'                                // 四舍五入后为 0 → 显示 0（避免 -0）
+  const s = v > 0 ? '+' : '-'
+  if (a >= 1e6) return s + (a / 1e4).toFixed(0) + '万'      // ≥100万 → 整数万
+  if (a >= 1e4) return s + (a / 1e4).toFixed(1) + '万'      // ≥1万 → 1位小数万
+  return s + Math.round(a).toLocaleString()                  // 元 → 千分位整数
+}
 function buildCalendarOption(pnl) {
   const cal = pnl.calendar || []
   const data = cal.map(c => [c.date, c.pnl])
@@ -53,7 +63,11 @@ function buildCalendarOption(pnl) {
       itemStyle: { borderColor: '#161b22', borderWidth: 1 },
       splitLine: { lineStyle: { color: '#2a3040' } },
       yearLabel: { color: '#8b949e' }, monthLabel: { color: '#8b949e' }, dayLabel: { color: '#8b949e' } },
-    series: [{ type: 'heatmap', coordinateSystem: 'calendar', data }],
+    series: [{
+      type: 'heatmap', coordinateSystem: 'calendar', data,
+      // v33 需求：每日收益框上显示当天收益数字（白字居中；悬停 tooltip 仍有精确两位小数）
+      label: { show: true, fontSize: 9, color: '#fff', formatter: p => calLabel(p.data[1]) },
+    }],
   }
 }
 

@@ -108,6 +108,11 @@ export default function Positions() {
   const [exportInfo, setExportInfo] = useState(null)   // 项目根目录导出文件信息
   const [dataBusy, setDataBusy] = useState(false)      // 导入导出操作中
   const [dataMsg, setDataMsg] = useState(null)         // 操作结果提示
+  // v33：一键清空（两层确认：第一层风险提示 + 第二层输入关键字「确认清空」）
+  const [clearStep, setClearStep] = useState(0)        // 0=关闭 1=第一层 2=第二层
+  const [clearWatchlist, setClearWatchlist] = useState(false)  // 是否连自选列表/指数一起清
+  const [clearKeyword, setClearKeyword] = useState('') // 第二层验证关键字
+  const [clearing, setClearing] = useState(false)      // 清空执行中
 
   const fetchData = async () => {
     try {
@@ -232,6 +237,28 @@ export default function Positions() {
       await refreshExportInfo()
     } catch (e) { setDataMsg({ ok: false, text: '导入失败：' + e.message }) }
     finally { setDataBusy(false) }
+  }
+
+  // ---- v33 一键清空（两层确认） ----
+  const closeClear = () => { setClearStep(0); setClearWatchlist(false); setClearKeyword(''); setClearing(false) }
+  // 第一层确认 → 进入第二层（需输入关键字）
+  const toClearStep2 = () => { setClearKeyword(''); setClearStep(2) }
+  // 第二层确认执行：调清空接口 → 后端同步重写根目录持仓 json → 刷新页面数据
+  const submitClearAll = async () => {
+    if (clearKeyword !== '确认清空') return
+    setClearing(true); setDataMsg(null)
+    try {
+      const r = await api.dataClearAll(clearWatchlist)
+      const c = r.cleared
+      const scopeTxt = clearWatchlist ? '（含自选列表与自选指数）' : ''
+      const jsonTxt = r.json_updated ? '✅' : '❌ 根目录 json 文件更新失败：' + (r.json_err || '未知')
+      setDataMsg({ ok: r.json_updated, text: `✅ 已清空全部持仓与交易记录${scopeTxt}，持仓数据 json 已同步更新。\n` +
+        `清空：交易流水 ${c.transactions} · 黄金流水 ${c.gold_txns} · 手动持仓/覆盖 ${c.position_override} · 收益编辑 ${c.asset_profit} · 历史快照 ${c.snapshots + c.position_snapshots} · 实物黄金 ${c.gold_grams > 0 ? c.gold_grams + '克' : '无'}` +
+        (clearWatchlist ? ` · 自选 ${c.watchlist} · 指数 ${c.custom_indices}` : '') + `\njson：${jsonTxt}` })
+      fetchData()
+      await refreshExportInfo()
+    } catch (e) { setDataMsg({ ok: false, text: '一键清空失败：' + e.message }) }
+    finally { setClearing(false); setClearStep(0); setClearWatchlist(false); setClearKeyword('') }
   }
 
   // 解析批量文本：每行「代码 持有金额 [持有收益]」，分隔符支持空格/Tab/逗号/顿号
@@ -827,12 +854,81 @@ export default function Positions() {
               : '项目根目录暂无导出文件，可先导出。'}
           </span>
         </div>
+        {/* v33 一键清空：危险操作，置于同卡分隔线下 */}
+        <div style={{ borderTop: '1px dashed var(--border)', margin: '14px 0 10px' }} />
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+          <button className="btn-danger" onClick={() => { setDataMsg(null); setClearWatchlist(false); setClearKeyword(''); setClearStep(1) }} disabled={dataBusy || clearing}>
+            🗑 一键清空全部持仓与交易记录
+          </button>
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>清空后不可恢复，建议先执行上方「导出数据」备份。点击后需通过两层确认。</span>
+        </div>
         {dataMsg && (
           <div className="fund-confirm-hint" style={{ display: 'block', marginTop: 10, whiteSpace: 'pre-line' }}>
             {dataMsg.text}
           </div>
         )}
       </div>
+
+      {/* v33 一键清空 · 第一重确认：风险提示 + 可选是否连自选一起清 */}
+      {clearStep === 1 && (
+        <div className="modal show" onClick={closeClear}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3 style={{ color: 'var(--up)' }}>⚠️ 一键清空 · 第一重确认</h3>
+              <button className="modal-close" onClick={closeClear}>×</button>
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.9 }}>
+              <p style={{ margin: '0 0 6px' }}>此操作将<b style={{ color: 'var(--up)' }}>永久清空</b>当前机器上的以下数据，<b style={{ color: 'var(--up)' }}>不可撤销</b>：</p>
+              <ul style={{ margin: '0 0 6px', paddingLeft: 20 }}>
+                <li>全部<b>持仓记录</b>：手动持仓 / 持仓覆盖 / 实物黄金 / 收益编辑覆盖</li>
+                <li>全部<b>交易记录</b>：股票 · 基金 · 债券 · 实物黄金的买卖流水</li>
+                <li><b>历史快照</b>与收益分析编辑（组合净值曲线将回到空仓状态）</li>
+              </ul>
+              <p style={{ margin: '0 0 10px', color: 'var(--muted)' }}>提示：如可能误操作，请先取消，并执行上方「⬇ 导出数据」生成备份后再清空。</p>
+              <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', padding: '8px 10px', background: 'rgba(248,81,73,.06)', border: '1px solid rgba(248,81,73,.25)', borderRadius: 8 }}>
+                <input type="checkbox" checked={clearWatchlist} onChange={e => setClearWatchlist(e.target.checked)} style={{ marginTop: 2 }} />
+                <span>同时清空<b>自选列表</b>与<b>自选指数</b>（行情看板「自选标的 / 指数大字卡」配置将一并移除，默认不勾选）</span>
+              </label>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
+              <button className="btn-ghost" onClick={closeClear} disabled={clearing}>取消</button>
+              <button style={{ background: 'var(--up)', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: 7, fontSize: 13, cursor: 'pointer', fontWeight: 600 }} onClick={toClearStep2}>我已了解，继续 →</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* v33 一键清空 · 第二重确认：输入关键字「确认清空」方可执行 */}
+      {clearStep === 2 && (
+        <div className="modal show">
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3 style={{ color: 'var(--up)' }}>⛔ 一键清空 · 第二重确认</h3>
+              <button className="modal-close" onClick={() => setClearStep(1)}>×</button>
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.9 }}>
+              <p style={{ margin: '0 0 4px' }}><b style={{ color: 'var(--up)' }}>最后一步：</b>即将{clearWatchlist ? '连同自选列表与自选指数一起' : ''}清空<b>全部持仓与交易记录</b>，此操作<b style={{ color: 'var(--up)' }}>无法撤销、无法恢复</b>。</p>
+              <p style={{ margin: '0 0 10px' }}>请输入 <b style={{ color: 'var(--up)' }}>确认清空</b>（不含引号）后点击按钮执行：</p>
+              <input
+                autoFocus
+                value={clearKeyword}
+                onChange={e => setClearKeyword(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && clearKeyword === '确认清空') submitClearAll() }}
+                placeholder="输入：确认清空"
+                style={{ width: '100%', padding: '9px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontSize: 14, boxSizing: 'border-box' }}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
+              <button className="btn-ghost" onClick={closeClear} disabled={clearing}>取消</button>
+              <button
+                style={{ background: 'var(--up)', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: 7, fontSize: 13, cursor: clearKeyword === '确认清空' && !clearing ? 'pointer' : 'not-allowed', fontWeight: 600, opacity: clearKeyword === '确认清空' && !clearing ? 1 : .5 }}
+                disabled={clearKeyword !== '确认清空' || clearing}
+                onClick={submitClearAll}>
+                {clearing ? '清空中…' : '确认清空（不可撤销）'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showForm && (
         <div className="modal show" onClick={() => setShowForm(false)}>

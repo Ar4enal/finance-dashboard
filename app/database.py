@@ -1147,3 +1147,52 @@ def import_all_data(payload):
         return stat
     finally:
         conn.close()
+
+
+def clear_all_positions(clear_watchlist=False):
+    """v33：一键清空全部持仓与交易记录（含收益覆盖/实物黄金/历史快照/持仓置顶）。
+
+    清空表集合与 import_all_data 的清空范围一致（保证导入/清空语义统一）：
+    transactions / snapshots / asset_profit / position_override / gold_transactions /
+    pinned_positions / position_snapshots / pnl_override + gold_holding 置零。
+    clear_watchlist=True 时连自选列表与自选指数一并清空（前端复选框由用户自选）。
+    返回各类清空前数量统计 dict（gold_grams=清空前实物黄金克数）。
+    """
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+
+        def _cnt(tbl):
+            cur.execute("SELECT COUNT(*) FROM " + tbl)
+            return cur.fetchone()[0]
+
+        g = conn.execute("SELECT grams FROM gold_holding WHERE id=1").fetchone()
+        stat = {
+            "transactions": _cnt("transactions"),            # 股票/基金/债券等买卖流水
+            "gold_txns": _cnt("gold_transactions"),          # 实物黄金买卖流水
+            "position_override": _cnt("position_override"),  # 手动持仓/持仓覆盖
+            "asset_profit": _cnt("asset_profit"),            # 收益编辑覆盖
+            "snapshots": _cnt("snapshots"),                  # 组合净值快照
+            "position_snapshots": _cnt("position_snapshots"),# 持仓级每日快照
+            "pnl_override": _cnt("pnl_override"),            # 收益分析编辑覆盖
+            "pinned_positions": _cnt("pinned_positions"),    # 持仓置顶
+            "gold_grams": g[0] if g else 0,                  # 清空前实物黄金克数
+            "watchlist": _cnt("watchlist"),                  # 自选列表
+            "custom_indices": _cnt("custom_indices"),        # 自选指数
+        }
+        cur.execute("DELETE FROM transactions")
+        cur.execute("DELETE FROM snapshots")
+        cur.execute("DELETE FROM asset_profit")
+        cur.execute("DELETE FROM position_override")
+        cur.execute("DELETE FROM gold_transactions")
+        cur.execute("DELETE FROM pinned_positions")
+        cur.execute("DELETE FROM position_snapshots")
+        cur.execute("DELETE FROM pnl_override")
+        cur.execute("UPDATE gold_holding SET grams=0, cost_price=0, updated_at=datetime('now','localtime') WHERE id=1")
+        if clear_watchlist:
+            cur.execute("DELETE FROM watchlist")
+            cur.execute("DELETE FROM custom_indices")
+        conn.commit()
+        return stat
+    finally:
+        conn.close()
