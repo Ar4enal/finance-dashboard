@@ -106,6 +106,11 @@ export const api = {
     a.click()
     document.body.removeChild(a)
   },
+  // v34 需求5：自动导出（每天定时把全部数据备份到本地）
+  autoExportInfo: () => request('/api/data/auto-export'),
+  autoExportSave: (enabled, time) =>
+    request(`/api/data/auto-export/config?enabled=${!!enabled}&time=${encodeURIComponent(time)}`, { method: 'POST' }),
+  autoExportRun: () => request('/api/data/auto-export/run', { method: 'POST' }),
   // 资讯
   news: (keyword) => request(`/api/news${keyword ? '?keyword=' + keyword : ''}`),
 }

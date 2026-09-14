@@ -20,6 +20,7 @@ from . import datasource as ds
 from . import indicators as ind
 from . import database as db
 from . import intraday_track as itrack
+from . import auto_export as ax
 
 app = FastAPI(title="金融工作台", version="1.0.0")
 
@@ -1752,16 +1753,23 @@ def manual_add_position_batch(items: list = Body(..., description="持仓数组 
 def portfolio_performance(period: str = "all"):
     """组合净值曲线与回撤。
     period: all=全部快照（默认）/ 30=最近30条 / 90=最近90条。
-    快照由组合汇总接口每日首次计算时自动写入（snapshots 表，每日一条）。"""
+    快照由组合汇总接口每日首次计算时自动写入（snapshots 表，每日一条）。
+
+    v34：新增 cumPnl 序列 —— 每日「累计收益（含已实现）」，取自快照 total_cum_pnl 列
+    （该列自 v32 起写入；更早的历史快照为 NULL）。NULL 一律保持 None 原样返回，
+    前端折线自动断点，绝不回填 0 或估算值（遵循数据真实性铁律）。"""
     snaps = db.get_snapshots()
     if period in ("30", "90") and snaps:
         snaps = snaps[-int(period):]
+    equity = [s["total_market_value"] for s in snaps]
     return ok({
         "dates": [s["snap_date"] for s in snaps],
-        "equity": [s["total_market_value"] for s in snaps],
+        "equity": equity,
         "cost": [s["total_cost"] for s in snaps],
-        "maxDrawdown": ind.max_drawdown([s["total_market_value"] for s in snaps]),
-        "totalReturn": ind.total_return([s["total_market_value"] for s in snaps]),
+        # v34：累计收益（含已实现）序列；历史 NULL 保持 None（前端断点，不虚构）
+        "cumPnl": [s.get("total_cum_pnl") for s in snaps],
+        "maxDrawdown": ind.max_drawdown(equity),
+        "totalReturn": ind.total_return(equity),
         "count": len(snaps),
     })
 
@@ -2077,6 +2085,42 @@ def data_clear_all(clear_watchlist: bool = False):
 
 
 # =========================================================
+# 持仓数据「自动导出」（v34 需求5）
+# 触发机制 / 时间格式 / 存储位置 / 命名规则详见 app/auto_export.py 模块文档。
+# =========================================================
+@app.get("/api/data/auto-export")
+def auto_export_info():
+    """自动导出状态：配置（启用/时间/保留份数）+ 存储目录 + 最近导出时间 + 备份文件列表。"""
+    try:
+        return ok(ax.info())
+    except Exception as e:
+        return fail("读取自动导出配置失败：%s" % str(e))
+
+
+@app.post("/api/data/auto-export/config")
+def auto_export_config(
+        enabled: Optional[bool] = Query(None, description="是否启用自动导出"),
+        time_: Optional[str] = Query(None, alias="time", description="导出时间，格式 HH:MM（24 小时制）"),
+        keep: Optional[int] = Query(None, description="保留最近份数")):
+    """保存自动导出配置（仅传需要修改的字段即可）。
+    时间格式为 "HH:MM"（24 小时制，默认 "06:00"）；非法输入由后端 _normalize_time 回退默认值。"""
+    try:
+        cfg = ax.save_config(enabled=enabled, time_str=time_, keep=keep)
+        return ok({"config": cfg, "info": ax.info()})
+    except Exception as e:
+        return fail("保存自动导出配置失败：%s" % str(e))
+
+
+@app.post("/api/data/auto-export/run")
+def auto_export_run():
+    """立即执行一次自动导出（便于验证；不影响定时调度：当天已导出过则不会重复定时触发）。"""
+    try:
+        return ok(ax.run_export(reason="manual"))
+    except Exception as e:
+        return fail("自动导出执行失败：%s" % str(e))
+
+
+# =========================================================
 # 财经资讯
 # =========================================================
 @app.get("/api/news")
@@ -2149,6 +2193,10 @@ def startup():
     db.init_default_indices()  # 首次启动填充内置预置指数
     try:
         itrack.start()  # 启动「无源指数分时」本地跟踪线程（每分钟采样，每交易日重置）
+    except Exception:
+        pass
+    try:
+        ax.start()  # v34 需求5：启动「持仓数据自动导出」调度线程（每 30s 轮询，含启动补导）
     except Exception:
         pass
 

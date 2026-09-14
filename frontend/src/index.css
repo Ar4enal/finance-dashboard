@@ -293,6 +293,12 @@ th.sortable .sort-arr { color: var(--accent); font-size: 11px; margin-left: 2px;
   color: inherit; font-size: 15px; font-weight: 600; padding: 3px 8px; margin-right: 6px;
 }
 .pnl-edit:focus { outline: none; border-color: var(--accent, #58a6ff); }
+/* v34 需求3：修复收益输入框的正负配色。
+   根因：上面的 .pnl-edit 写了 color:inherit，与全局 .up/.down 选择器特异性相同，
+   而 .pnl-edit 定义靠后 → 后者胜出，把 up/down 的颜色覆盖掉了（正负色一直不生效）。
+   下面用双类选择器（特异性更高）显式指定，红=正 / 绿=负，与全站口径一致。 */
+.pnl-edit.up { color: var(--up, #f85149); }
+.pnl-edit.down { color: var(--down, #3fb950); }
 .pnl-edited-tag { font-size: 11px; color: #d29922; font-weight: 600; }
 
 /* v32 总览当日收益明细弹窗 */

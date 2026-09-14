@@ -9,6 +9,23 @@ const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
 
+// v34：净值曲线 tooltip —— 日期 + 三条线金额（千分位；空值显示「—」，不虚构）
+const perfTipFmt = (ps) => {
+  if (!ps || !ps.length) return ''
+  const rows = ps.map(p => {
+    const v = p.value
+    const s = (v == null || isNaN(v)) ? '—' : '¥' + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+    return `${p.marker}${p.seriesName}&nbsp;&nbsp;${s}`
+  })
+  return (ps[0].axisValue || '') + '<br/>' + rows.join('<br/>')
+}
+
+// v34 需求3：收益输入框的显示值 —— 正数带「+」号（负数由 String() 自带「-」），与全站 sign() 口径一致；
+// 红=正 / 绿=负 由 cls() 挂 up/down 类承担，符号与颜色由此保持同一判据（>0 / <0），不会出现红配负号。
+const pnlInputVal = (n) => (n == null ? 0 : (n > 0 ? '+' + n : String(n)))
+// v34 需求3：收益输入框的解析 —— 容忍用户输入的半角/全角逗号与空格
+const parsePnlInput = (s) => parseFloat(String(s).replace(/[,，\s]/g, ''))
+
 // 收益分析 - 柱状图：每个持仓在区间内收益
 function buildBarOption(pnl) {
   const data = (pnl.details || [])
@@ -51,23 +68,48 @@ function buildCalendarOption(pnl) {
   else if (pnl.type === 'cum') range = (pnl.start_date || pnl.range || '').slice(0, 4)
   const vals = cal.map(c => c.pnl || 0)
   const maxAbs = Math.max(1, ...vals.map(v => Math.abs(v)))
+  // v34 需求2：格子左上角显示当天日期数字。
+  // 月视图（range=YYYY-MM，格子约 168×26px）→ 生成整月每一天，尚未产生收益的空白格也能认出日期；
+  // 年/累计视图（range=YYYY，12 个月横排、格子很小）→ 只对有收益数据的格子显示，避免文字挤压。
+  const dayRows = (() => {
+    if (!range || range.length !== 7) return data
+    const [y, m] = range.split('-').map(Number)
+    const n = new Date(y, m, 0).getDate()   // m 为 1-12（JS 月份 0-based），day 0 取到当月最后一天
+    const rows = []
+    for (let i = 1; i <= n; i++) rows.push([range + '-' + String(i).padStart(2, '0'), 0])
+    return rows
+  })()
   return {
     animation: false,
     tooltip: { formatter: p => `${p.data[0]}<br/>收益 ${sign(p.data[1])}` },
     visualMap: {
+      seriesIndex: [0, 1],   // 必须覆盖两个 heatmap（ECharts 要求每个 heatmap series 都能关联到 visualMap，否则抛错）；日期层值恒为 0 且透明，不影响观感
       min: -maxAbs, max: maxAbs, calculable: true, orient: 'horizontal', left: 'center', bottom: 0,
       inRange: { color: ['#3fb950', '#2d333b', '#f85149'] },
       textStyle: { color: '#8b949e' },
     },
-    calendar: { top: 36, left: 30, right: 30, cellSize: ['auto', 22], range,
+    calendar: { top: 36, left: 30, right: 30, cellSize: ['auto', 26], range,
       itemStyle: { borderColor: '#161b22', borderWidth: 1 },
       splitLine: { lineStyle: { color: '#2a3040' } },
-      yearLabel: { color: '#8b949e' }, monthLabel: { color: '#8b949e' }, dayLabel: { color: '#8b949e' } },
-    series: [{
-      type: 'heatmap', coordinateSystem: 'calendar', data,
-      // v33 需求：每日收益框上显示当天收益数字（白字居中；悬停 tooltip 仍有精确两位小数）
-      label: { show: true, fontSize: 9, color: '#fff', formatter: p => calLabel(p.data[1]) },
-    }],
+      yearLabel: { color: '#8b949e' }, monthLabel: { color: '#8b949e' },
+      // v34 需求2：每行按「周一 → 周日」排列（ECharts 默认 firstDay=0，即周日打头）
+      dayLabel: { color: '#8b949e', firstDay: 1 } },
+    series: [
+      {
+        type: 'heatmap', coordinateSystem: 'calendar', data,
+        // v33 需求：每日收益框上显示当天收益数字（白字居中；悬停 tooltip 仍有精确两位小数）
+        label: { show: true, fontSize: 9, color: '#fff', formatter: p => calLabel(p.data[1]) },
+      },
+      // v34 需求2：每个格子左上角以数字显示当天日期（透明层不遮挡热力色，silent 不干扰 tooltip 与点击）
+      {
+        type: 'heatmap', coordinateSystem: 'calendar', data: dayRows,
+        itemStyle: { opacity: 0 }, silent: true, z: 3,
+        label: {
+          show: true, position: 'insideTopLeft', fontSize: 9, color: 'rgba(255,255,255,.7)',
+          formatter: p => String(Number(p.data[0].slice(8))),
+        },
+      },
+    ],
   }
 }
 
@@ -189,19 +231,26 @@ export default function Analysis() {
           <>
             <EChart className="chart-md" option={{
               animation: false,
-              tooltip: { trigger: 'axis' },
+              tooltip: { trigger: 'axis', formatter: perfTipFmt },
               // 图例色显式对齐实际折线色（否则 ECharts 图例取默认调色板色，与线色不符）
               legend: { data: [
                 { name: '总市值', itemStyle: { color: '#58a6ff' } },
                 { name: '总成本', itemStyle: { color: '#8b949e' } },
+                { name: '累计收益', itemStyle: { color: '#d29922' } },
               ], textStyle: { color: '#8b949e' }, top: 0 },
-              grid: { left: 70, right: 20, top: 34, bottom: 30 },
+              grid: { left: 70, right: 70, top: 34, bottom: 30 },
               xAxis: { type: 'category', data: perf.dates, axisLabel: { color: '#8b949e' }, axisLine: { lineStyle: { color: '#2a3040' } } },
-              yAxis: { type: 'value', scale: true, axisLabel: { color: '#8b949e', formatter: v => v >= 1e4 ? (v / 1e4).toFixed(1) + '万' : v }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },
+              // v34：双 Y 轴 —— 左轴 总市值/总成本，右轴 累计收益（两者量级差约 5 倍，各自刻度才能看清趋势）
+              yAxis: [
+                { type: 'value', scale: true, axisLabel: { color: '#8b949e', formatter: v => v >= 1e4 ? (v / 1e4).toFixed(1) + '万' : v }, splitLine: { lineStyle: { color: 'rgba(42,48,64,.4)' } } },
+                { type: 'value', scale: true, axisLine: { show: true, lineStyle: { color: '#d29922' } }, axisLabel: { color: '#d29922', formatter: v => v >= 1e4 ? (v / 1e4).toFixed(1) + '万' : v }, splitLine: { show: false } },
+              ],
               dataZoom: [{ type: 'inside', start: 0, end: 100 }],
               series: [
-                { name: '总市值', type: 'line', data: perf.equity, symbol: 'none', lineStyle: { color: '#58a6ff', width: 2 }, areaStyle: { color: 'rgba(88,166,255,.12)' } },
-                { name: '总成本', type: 'line', data: perf.cost, symbol: 'none', lineStyle: { color: '#8b949e', width: 1, type: 'dashed' } },
+                { name: '总市值', type: 'line', data: perf.equity, symbol: 'none', yAxisIndex: 0, lineStyle: { color: '#58a6ff', width: 2 }, areaStyle: { color: 'rgba(88,166,255,.12)' } },
+                { name: '总成本', type: 'line', data: perf.cost, symbol: 'none', yAxisIndex: 0, lineStyle: { color: '#8b949e', width: 1, type: 'dashed' } },
+                // v34：累计收益（含已实现）—— 挂右轴；历史 NULL 处自动断点（connectNulls:false），不虚构补点
+                { name: '累计收益', type: 'line', data: perf.cumPnl || [], symbol: 'none', yAxisIndex: 1, connectNulls: false, lineStyle: { color: '#d29922', width: 2 } },
               ],
             }} />
             <div className="metric" style={{ marginTop: 12 }}>
@@ -252,10 +301,10 @@ export default function Analysis() {
               <div className="m"><div className="l">区间</div><div className="v" style={{ fontSize: 14 }}>{pnl.range}</div></div>
               <div className="m">
                 <div className="l">{pnlType === 'day' ? '当日' : pnlType === 'month' ? '本月' : pnlType === 'year' ? '本年' : '累计'}收益（点击编辑）</div>
-                <input className={`v pnl-edit ${cls(pnl.combo_pnl)}`} type="number" step="0.01" defaultValue={pnl.combo_pnl ?? 0}
+                <input className={`v pnl-edit ${cls(pnl.combo_pnl)}`} type="text" inputMode="decimal" defaultValue={pnlInputVal(pnl.combo_pnl)}
                   key={`combo-${pnlType}-${pnl.range}-${pnl.combo_pnl}`}
-                  onBlur={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) savePnlOverride('__COMBO__', '__COMBO__', null, v) }}
-                  onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }} title="手动修正组合总收益（持久化）" />
+                  onBlur={e => { const v = parsePnlInput(e.target.value); if (!isNaN(v)) savePnlOverride('__COMBO__', '__COMBO__', null, v) }}
+                  onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }} title="手动修正组合总收益（持久化；正数可带 + 号）" />
                 <div className="l">{sign(pnl.combo_pnl_pct)}%{pnl.combo_edited ? ' · 已编辑' : ''}</div>
               </div>
               <div className="m"><div className="l">持仓数</div><div className="v">{pnl.details.length}</div></div>
@@ -276,10 +325,10 @@ export default function Analysis() {
                   <tr key={i}>
                     <td>{d.market}</td><td>{d.code}</td><td style={{ cursor: 'pointer' }} onClick={() => openKline(d.market, d.code, d.name)} title="点击查看 K 线行情">{d.name}</td>
                     <td className="num">
-                      <input className={`pnl-edit ${cls(d.pnl)}`} type="number" step="0.01" defaultValue={d.pnl ?? 0}
+                      <input className={`pnl-edit ${cls(d.pnl)}`} type="text" inputMode="decimal" defaultValue={pnlInputVal(d.pnl)}
                         key={`${d.market}-${d.code}-${pnlType}-${pnl.range}-${d.pnl}`}
-                        onBlur={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) savePnlOverride(d.market, d.code, v, null) }}
-                        onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }} title="手动修正该持仓区间收益（持久化）" />
+                        onBlur={e => { const v = parsePnlInput(e.target.value); if (!isNaN(v)) savePnlOverride(d.market, d.code, v, null) }}
+                        onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }} title="手动修正该持仓区间收益（持久化；正数可带 + 号）" />
                       {d.edited ? <span className="pnl-edited-tag">已编辑</span> : null}
                     </td>
                   </tr>

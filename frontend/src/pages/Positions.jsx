@@ -113,6 +113,11 @@ export default function Positions() {
   const [clearWatchlist, setClearWatchlist] = useState(false)  // 是否连自选列表/指数一起清
   const [clearKeyword, setClearKeyword] = useState('') // 第二层验证关键字
   const [clearing, setClearing] = useState(false)      // 清空执行中
+  // v34 需求5：自动导出（每天定时把全部数据备份到本地）
+  const [autoInfo, setAutoInfo] = useState(null)       // 后端自动导出状态（配置/目录/最近导出/文件列表）
+  const [autoForm, setAutoForm] = useState({ enabled: true, time: '06:00' })  // 待保存的表单值
+  const [autoBusy, setAutoBusy] = useState(false)      // 保存/立即导出中
+  const [autoMsg, setAutoMsg] = useState(null)         // 操作结果提示
 
   const fetchData = async () => {
     try {
@@ -214,6 +219,33 @@ export default function Positions() {
     try { setExportInfo(await api.dataExportInfo()) } catch {}
   }
   useEffect(() => { refreshExportInfo() }, [])
+  // ---- v34 需求5：自动导出（配置读取 / 保存 / 立即导出一次） ----
+  const refreshAutoInfo = async () => {
+    try {
+      const d = await api.autoExportInfo()
+      setAutoInfo(d)
+      setAutoForm({ enabled: !!d.enabled, time: d.time || '06:00' })
+    } catch {}
+  }
+  useEffect(() => { refreshAutoInfo() }, [])
+  const saveAutoConfig = async () => {
+    setAutoBusy(true); setAutoMsg(null)
+    try {
+      const d = await api.autoExportSave(autoForm.enabled, autoForm.time)
+      setAutoInfo(d.info)
+      setAutoMsg({ ok: true, text: `✅ 已保存：${d.config.enabled ? '启用' : '停用'}，每天 ${d.config.time} 自动导出（保留最近 ${d.config.keep} 份）` })
+    } catch (e) { setAutoMsg({ ok: false, text: '保存失败：' + e.message }) }
+    finally { setAutoBusy(false) }
+  }
+  const runAutoExport = async () => {
+    setAutoBusy(true); setAutoMsg(null)
+    try {
+      const r = await api.autoExportRun()
+      setAutoMsg({ ok: true, text: `✅ 已导出：${r.file}（${(r.size / 1024).toFixed(1)} KB）\n存储位置：${r.path}` })
+      await refreshAutoInfo()
+    } catch (e) { setAutoMsg({ ok: false, text: '导出失败：' + e.message }) }
+    finally { setAutoBusy(false) }
+  }
   // 导出：后端生成 JSON 文件到项目根目录，浏览器下载
   const doExport = async () => {
     setDataBusy(true); setDataMsg(null)
@@ -523,6 +555,8 @@ export default function Positions() {
               )}
             <div className="pos-row"><span>数量</span><b>{p.sold_out ? '—' : fmt(p.quantity, p.is_physical_gold ? 2 : 0)}</b></div>
             <div className="pos-row"><span>持仓成本</span><b>{p.sold_out ? '—' : money(p.cost)}</b></div>
+            {/* v34 需求4：持仓卡片同步展示单位成本（紧邻「持仓成本」，位于其与「现价 / 市值」之间） */}
+            <div className="pos-row" title="加权平均单位成本（每份 / 每股 / 每克）"><span>单位成本</span><b>{p.sold_out ? '—' : pfmt(p.avg_cost, p.market)}</b></div>
             <div className="pos-row"><span>现价 / 市值</span><b>{p.sold_out ? <span className="muted">— / —</span> : (p.data_available === false ? <span className="muted">— / —</span> : `${pfmt(p.price, p.market)} / ${money(p.market_value)}`)}</b></div>
           </div>
         ))}
@@ -540,7 +574,8 @@ export default function Positions() {
           <span className="pc-sub" style={{ marginLeft: 10, fontSize: 12 }}>📌 置顶的产品永远排在列表最前</span>
         </div>
         <table>
-          <thead><tr><th>名称</th><th>市场</th><th className="num">数量</th><th className="num">持仓成本</th><th className="num">现价</th><th className="num">市值</th><th>收益</th><th>操作</th></tr></thead>
+          {/* v34 需求4：新增「单位成本」列，位置按需求插在「持仓成本」与「现价」之间 */}
+          <thead><tr><th>名称</th><th>市场</th><th className="num">数量</th><th className="num">持仓成本</th><th className="num" title="加权平均单位成本（每份 / 每股 / 每克）">单位成本</th><th className="num">现价</th><th className="num">市值</th><th>收益</th><th>操作</th></tr></thead>
           <tbody>
             {pagePositions.map(p => (
               <tr key={p.code + p.market}>
@@ -554,6 +589,8 @@ export default function Positions() {
                 <td><span className="badge badge-a">{p.market}</span></td>
                 <td className="num">{p.sold_out ? '—' : fmt(p.quantity, p.is_physical_gold ? 2 : 0)}</td>
                 <td className="num">{p.sold_out ? '—' : money(p.cost)}</td>
+                {/* v34 需求4：单位成本（加权平均），基金 4 位小数、其余 2 位（与「现价」同口径） */}
+                <td className="num">{p.sold_out ? '—' : pfmt(p.avg_cost, p.market)}</td>
                 <td className="num">{p.data_available === false ? <span className="muted">数据暂不可用</span> : (p.sold_out ? '—' : pfmt(p.price, p.market))}</td>
                 <td className="num">{p.data_available === false ? <span className="muted">—</span> : (p.sold_out ? '—' : money(p.market_value))}</td>
                 <td>
@@ -775,6 +812,10 @@ export default function Positions() {
             <div className="pos-row" style={{ border: '1px solid var(--border)', padding: '10px 14px', borderRadius: 8, minWidth: 160 }}>
               <span>持仓成本</span><b>{money(gold.cost)}</b>
             </div>
+            {/* v34 需求4：实物黄金单位成本（元/克），紧邻「持仓成本」，与股票/基金卡片布局一致 */}
+            <div className="pos-row" style={{ border: '1px solid var(--border)', padding: '10px 14px', borderRadius: 8, minWidth: 160 }} title="实物黄金单位成本（元/克）">
+              <span>单位成本</span><b>{gold.cost_price != null ? '¥' + fmt(gold.cost_price) + ' /克' : '—'}</b>
+            </div>
             <div className="pos-row" style={{ border: '1px solid var(--border)', padding: '10px 14px', borderRadius: 8, minWidth: 160 }}>
               <span>盈亏</span><b className={cls(gold.pnl)}>{gold.pnl != null ? sign(gold.pnl) : '数据暂不可用'}</b>
               {gold.pnl_pct != null && <div style={{ color: cls(gold.pnl_pct), fontSize: 12 }}>{sign(gold.pnl_pct)}%</div>}
@@ -854,6 +895,48 @@ export default function Positions() {
               : '项目根目录暂无导出文件，可先导出。'}
           </span>
         </div>
+        {/* v34 需求5：自动导出 —— 定时把全部数据备份到本地（配置入口位于导出数据模块内） */}
+        <div style={{ borderTop: '1px dashed var(--border)', margin: '14px 0 10px' }} />
+        <div className="card-title" style={{ fontSize: 14, marginBottom: 8 }}>⏱ 自动导出
+          <span className="pc-sub" style={{ marginLeft: 8, fontSize: 12 }}>
+            {autoInfo ? (autoInfo.enabled ? `已启用 · 每天 ${autoInfo.time} 自动备份到本地` : '已停用') : '加载中…'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end', marginBottom: 10 }}>
+          <div>
+            <div className="form-label">启用</div>
+            <select className="form-input" style={{ width: 110 }} value={autoForm.enabled ? '1' : '0'}
+              onChange={e => setAutoForm({ ...autoForm, enabled: e.target.value === '1' })}>
+              <option value="1">启用</option>
+              <option value="0">停用</option>
+            </select>
+          </div>
+          <div>
+            <div className="form-label">每天导出时间（24 小时制）</div>
+            <input className="form-input" type="time" style={{ width: 150 }} value={autoForm.time}
+              onChange={e => setAutoForm({ ...autoForm, time: e.target.value })} />
+          </div>
+          <button className="btn" onClick={saveAutoConfig} disabled={autoBusy}>{autoBusy ? '处理中…' : '保存设置'}</button>
+          <button className="btn-ghost" onClick={runAutoExport} disabled={autoBusy} title="立即备份一次（不影响定时调度）">⚡ 立即导出一次</button>
+        </div>
+        {autoInfo && (
+          <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 2 }}>
+            <div>📁 存储位置：<code>{autoInfo.dir_display}</code>（项目 data 目录下，已在 .gitignore 中，不会进仓库）</div>
+            <div>📄 文件命名：<code>{autoInfo.name_pattern}</code> —— 每天一份；保留最近 <b>{autoInfo.keep}</b> 份，超出的自动删除</div>
+            <div>🕒 最近导出：<b>{autoInfo.last_run || '尚未导出'}</b> · 当前共 <b>{autoInfo.count}</b> 份备份
+              {autoInfo.files && autoInfo.files.length > 0 && <span> · 最近：{autoInfo.files.slice(0, 3).map(f => f.name).join('、')}</span>}
+            </div>
+            <div style={{ color: '#d29922' }}>
+              💡 触发方式：服务运行期间到点自动导出；服务未运行时不会触发，但<b>下次启动后若当天尚未导出会自动补导一次</b>。
+            </div>
+            {!autoInfo.enabled && <div style={{ color: '#d29922' }}>⚠️ 自动导出当前已停用，到点不会备份（仍可用「立即导出一次」手动触发）。</div>}
+          </div>
+        )}
+        {autoMsg && (
+          <div className="fund-confirm-hint" style={{ display: 'block', marginTop: 10, whiteSpace: 'pre-line' }}>
+            {autoMsg.text}
+          </div>
+        )}
         {/* v33 一键清空：危险操作，置于同卡分隔线下 */}
         <div style={{ borderTop: '1px dashed var(--border)', margin: '14px 0 10px' }} />
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>

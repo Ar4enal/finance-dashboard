@@ -171,8 +171,50 @@ def init_db():
             UNIQUE(market, code, pnl_type, range_val)
         )
     """)
+    # 应用配置表（v34 需求5）：键值对，用于自动导出时间等「用户可配置项」。
+    # 随「数据导出/导入」跨机器迁移；但「一键清空持仓」不清空本表（配置不属于持仓数据）。
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
     conn.commit()
     conn.close()
+
+
+# ---------------- 应用配置（v34 需求5） ----------------
+def get_setting(key, default=None):
+    """读取配置项；不存在返回 default。"""
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+    finally:
+        conn.close()
+
+
+def set_setting(key, value):
+    """写入配置项（存在则覆盖）。"""
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings(key, value, updated_at) VALUES(?,?,datetime('now','localtime'))",
+            (key, "" if value is None else str(value)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_all_settings():
+    """返回全部配置项 dict（供导出）。"""
+    conn = _connect()
+    try:
+        rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+        return {r[0]: r[1] for r in rows}
+    finally:
+        conn.close()
 
 
 # ---------------- 自选 ----------------
@@ -1001,6 +1043,8 @@ def export_all_data():
         payload["pnl_override"] = get_all_pnl_overrides()
     finally:
         conn.close()
+    # v34 需求5：应用配置（自动导出启用状态 / 时间等）一并导出，跨机器迁移后保留设置
+    payload["settings"] = get_all_settings()
     return payload
 
 
@@ -1031,7 +1075,18 @@ def import_all_data(payload):
         stat = {
             "watchlist": 0, "transactions": 0, "snapshots": 0,
             "gold": 0, "gold_txns": 0, "asset_profit": 0, "position_override": 0,
+            "settings": 0,
         }
+
+        # v34 需求5：应用配置（自动导出时间等）。**仅当备份文件含 settings 时才恢复**——
+        # 旧备份无此项时保留当前配置，避免导入旧文件反而丢失自动导出设置。
+        # 本表也不在上方「清空用户数据表」范围内（配置不属于持仓数据）。
+        if isinstance(payload.get("settings"), dict):
+            for k, v in payload["settings"].items():
+                cur.execute("INSERT OR REPLACE INTO app_settings(key,value,updated_at) "
+                            "VALUES(?,?,datetime('now','localtime'))",
+                            (str(k), "" if v is None else str(v)))
+                stat["settings"] += 1
 
         # 2) 自选
         for w in payload.get("watchlist", []):
