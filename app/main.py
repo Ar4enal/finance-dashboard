@@ -1031,6 +1031,18 @@ def _gold_position(realized=None, overrides=None, g=None):
 # =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
+    """组合汇总（总资产 / 总成本 / 当前持仓收益 / 累计收益）。
+
+    v34 修复两处口径缺陷：
+    1. 【不再回读当日快照覆盖】原实现在写入当日快照后，立刻把快照值读回来覆盖这三项
+       数字，导致总览被冻结在「当天首次打开时」的旧值——行情走动、在持仓管理里改
+       数量/成本、手工覆盖收益，总览都不再变化，与持仓管理页长期对不上。
+       现在三项全部实时计算、与 /api/positions 同源，保证
+       「总资产 − 总成本 = 当前持仓收益」自洽。当日快照仍照常写入，
+       供净值曲线/最大回撤按日记录，两者互不影响。
+    2. 【行情不完整时不写快照】任一持仓行情/净值不可用、或金价不可用时不写当日快照，
+       避免一次瞬时取数失败把错误市值冻结进净值曲线；等数据恢复后的下次请求再补写。
+    """
     # 复用 positions 的计算结果（含用户收益覆盖），保证各界面口径一致
     data = _positions_data_cached()  # v33：3s 共享缓存（并行接口避免重复拉行情）
     total_mv = 0.0
@@ -1039,7 +1051,14 @@ def portfolio_summary():
     total_cum_pnl = 0.0
     gold_ok = True
     has_gold = False
+    unavailable = 0   # v34：行情不可用的持仓数（未计入汇总）
     for p in data:
+        # v34 修复：行情不可用的持仓，市值/成本/收益【全部不计入】汇总。
+        # 原实现只排除市值却仍把成本计入，会把「取不到行情」错算成亏损，
+        # 并让「总资产 − 总成本 ≠ 当前持仓收益」，三项数字互不自洽。
+        if p.get("data_available") is False:
+            unavailable += 1
+            continue
         # 已清仓产品 market_value/cost 为 None，用 or 0 兜底（cumPnl/holdingPnl 由 _apply_profit_overrides 设为 0，无 None）
         total_mv += p.get("market_value") or 0
         total_cost += p.get("cost") or 0
@@ -1055,32 +1074,21 @@ def portfolio_summary():
         total_cost += cost
         gold_ok = False
     total_holding_pct = round(total_holding_pnl / total_cost * 100, 2) if total_cost else 0
-    # 每日净值快照（幂等）：当天首次计算组合时写入，供净值曲线/最大回撤使用。
-    # 快照口径与组合汇总一致（含实物黄金按成本兜底），随使用自然积累。
-    db.ensure_snapshot_today(round(total_mv, 2), round(total_cost, 2), round(total_cum_pnl, 2))
-    # 持仓级每日快照（幂等）：同步记录每个持仓当天市值，供收益分析按持仓拆分日/月/年收益。
-    pos_snap_items = []
-    for p in data:
-        if p.get("is_physical_gold"):
-            # 实物黄金一次性写入市场市值（GOLD_PHYSICAL）
-            pos_snap_items.append(("GOLD", "GOLD_PHYSICAL", p.get("market_value")))
-        else:
-            pos_snap_items.append((p.get("market"), p.get("code"), p.get("market_value")))
-    db.ensure_position_snapshots_today(pos_snap_items)
-    # 收益口径锚定当日快照：从快照读回（冻结当日值），保证刷新稳定且基于当前持仓。
-    # 当天首次/重算时快照已写入当前持仓收益；之后保持冻结，不再随实时行情跳动。
-    snap = db.get_snapshot_today()
-    if snap:
-        smv = snap.get("total_market_value") or 0
-        scost = snap.get("total_cost") or 0
-        scum = snap.get("total_cum_pnl")
-        if scum is None:
-            scum = smv - scost
-        total_mv = smv
-        total_cost = scost
-        total_holding_pnl = round(smv - scost, 2)
-        total_cum_pnl = round(scum, 2)
-        total_holding_pct = round(total_holding_pnl / total_cost * 100, 2) if total_cost else 0
+    # 每日净值快照（幂等）：当天首次「数据完整」时写入，供净值曲线/最大回撤使用。
+    # v34：数据不完整（有持仓行情缺失或金价不可用）时跳过写入，避免污染净值曲线；
+    # 之后数据恢复的下一次请求会自动补写当天快照。
+    data_complete = (unavailable == 0 and gold_ok)
+    if data_complete:
+        db.ensure_snapshot_today(round(total_mv, 2), round(total_cost, 2), round(total_cum_pnl, 2))
+        # 持仓级每日快照（幂等）：记录每个持仓当天市值，供收益分析按持仓拆分日/月/年收益。
+        pos_snap_items = []
+        for p in data:
+            if p.get("is_physical_gold"):
+                # 实物黄金一次性写入市场市值（GOLD_PHYSICAL）
+                pos_snap_items.append(("GOLD", "GOLD_PHYSICAL", p.get("market_value")))
+            else:
+                pos_snap_items.append((p.get("market"), p.get("code"), p.get("market_value")))
+        db.ensure_position_snapshots_today(pos_snap_items)
     return ok({
         "totalMarketValue": round(total_mv, 2),
         "totalCost": round(total_cost, 2),
@@ -1091,6 +1099,9 @@ def portfolio_summary():
         "totalPnl": round(total_holding_pnl, 2),
         "totalPnlPct": total_holding_pct,
         "goldAvailable": gold_ok,
+        # v34 新增：未计入汇总的持仓数、本次汇总数据是否完整（前端提示用）
+        "unavailableCount": unavailable,
+        "dataComplete": data_complete,
     })
 
 
@@ -1186,7 +1197,23 @@ def _positions_data():
             _apply_profit_overrides(p, overrides, 0.0, 0.0, rpnl)
             continue
         sym = ds.to_sina_symbol(ds.normalize_market(p["market"]), p["code"])
-        if bulk_fail:
+        q = {} if bulk_fail else quotes_map.get(sym, {})
+        price = q.get("price", 0)
+        # 基金：市值用单位净值（NAV）计算，而非盘中实时价（v25 需求3）。
+        # NAV 每日收盘后才更新——取 NAV 最新一条即「当日已更新用当日、否则自动为前一交易日」。
+        # v34 修复：官方净值取不到（st=='err'）时不再把 price 当 0（那会让市值变 0、
+        # 持仓收益 = −成本，静默失真且看起来像"亏光"），改为标记行情不可用：
+        # 市值 None、收益 0，前端显示「数据暂不可用」，汇总时整体不计入。
+        nav_fail = False
+        if not bulk_fail and p["market"] == "FUND":
+            fcode = re.sub(r'^fu_', '', str(p["code"]))
+            nav, st = nav_map.get(fcode, (None, "err"))
+            if st == "ok":
+                price = nav
+            elif st == "err":
+                nav_fail = True
+            # st == "empty"：官方无净值数据，保持新浪估算价（与原实现一致）
+        if bulk_fail or nav_fail:
             # 行情不可用：市值/现价未知，保持 None（不回退成 cost，否则"按市值"排序
             # 会与"按成本"混同、且会虚增组合总市值）；浮动盈亏无法计算置 0。
             p["price"] = None
@@ -1194,19 +1221,9 @@ def _positions_data():
             holding_pnl = 0.0
             holding_pnl_pct = 0.0
             p["data_available"] = False
+            if nav_fail:
+                p["name"] = q.get("name") or p["code"]  # 净值失败仍可展示真实产品名
         else:
-            q = quotes_map.get(sym, {})
-            price = q.get("price", 0)
-            # 基金：市值用单位净值（NAV）计算，而非盘中实时价（v25 需求3）。
-            # NAV 每日收盘后才更新——取 NAV 最新一条即「当日已更新用当日、否则自动为前一交易日」。
-            if p["market"] == "FUND":
-                fcode = re.sub(r'^fu_', '', str(p["code"]))
-                nav, st = nav_map.get(fcode, (None, "err"))
-                if st == "ok":
-                    price = nav
-                elif st == "err":
-                    price = 0  # NAV 取不到则无法计算基金市值
-                # st == "empty"：官方无净值数据，保持新浪估算价（与原实现一致）
             mv = price * p["quantity"]
             holding_pnl = mv - p["cost"]
             holding_pnl_pct = round(holding_pnl / p["cost"] * 100, 2) if p["cost"] else 0
@@ -1948,20 +1965,36 @@ def pnl_series(days: int = 30, kind: str = "holding"):
     })# =========================================================
 @app.get("/api/reports/export")
 def report_export(fmt: str = "csv"):
-    # CSV 导出持仓 + 交易
+    """导出 CSV：持仓汇总 + 交易流水。
+
+    v34 修复：持仓部分改用 `_positions_data_cached()`（与持仓管理 / 总览 / 报表页表格**同源**）。
+    此前用 `db.compute_positions()` —— 它只重放 `transactions` 表、**完全忽略 `position_override`**，
+    导致「直接新增的初始持仓」（无交易记录，如本机 24 只基金）在导出中整批丢失：
+    实测报表页表格 25 条，导出的 CSV 只有 1 条（仅实物黄金）。
+    数值一律输出**原始数字**（不带 ¥ 与千分位），便于 Excel / 脚本直接解析。
+    """
     import io
     import csv
-    pos = db.compute_positions()
+    pos = _positions_data_cached()
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["market", "code", "quantity", "avg_cost", "cost"])
+    # 列与「报表 → 持仓汇总」表格一致（额外加「代码」，CSV 无代码无法作为数据使用）
+    w.writerow(["名称", "市场", "代码", "数量", "市值", "成本", "盈亏", "收益率%"])
+
+    def _v(x):
+        return "" if x is None else x
+
     for p in pos:
-        w.writerow([p["market"], p["code"], p["quantity"], p["avg_cost"], p["cost"]])
-    # 实物黄金
-    gold = db.get_gold_holding()
-    if gold["grams"] > 0:
-        w.writerow(["GOLD", "GOLD_PHYSICAL", gold["grams"], gold["cost_price"],
-                    round(gold["cost_price"] * gold["grams"], 2)])
+        w.writerow([
+            p.get("name") or p.get("code") or "",
+            p.get("market") or "",
+            p.get("code") or "",
+            _v(p.get("quantity")),
+            _v(p.get("market_value")),
+            _v(p.get("cost")),
+            _v(p.get("holdingPnl")),
+            _v(p.get("holdingPnlPct")),
+        ])
     txns = db.get_transactions()
     w.writerow([])
     w.writerow(["date", "market", "code", "side", "quantity", "price", "fee"])

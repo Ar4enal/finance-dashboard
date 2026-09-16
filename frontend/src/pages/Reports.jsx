@@ -45,10 +45,15 @@ export default function Reports() {
 
   useEffect(() => { load() }, [])
 
-  const totalMv = positions.reduce((s, p) => s + (p.market_value || 0), 0)
-  const totalCost = positions.reduce((s, p) => s + (p.cost || 0), 0)
-  const totalPnl = totalMv - totalCost
+  // v34 修复：合计只统计「行情可用」的持仓，且盈亏改用 Σ pnl（含手工收益覆盖），
+  // 与总览「当前持仓收益」口径一致。此前把不可用持仓的成本计入、市值却按 0 计，
+  // 会凭空多出一笔亏损、破坏「市值 − 成本 = 盈亏」自洽（后端 v34 需求6 堵的是同一个坑）。
+  const avail = positions.filter(p => p.data_available !== false)
+  const totalMv = avail.reduce((s, p) => s + (p.market_value || 0), 0)
+  const totalCost = avail.reduce((s, p) => s + (p.cost || 0), 0)
+  const totalPnl = avail.reduce((s, p) => s + (p.pnl || 0), 0)
   const totalPct = totalCost ? (totalPnl / totalCost * 100) : 0
+  const unavailableN = positions.length - avail.length
 
   return (
     <section className="page active">
@@ -96,6 +101,11 @@ export default function Reports() {
           </tbody>
         </table>
         {positions.length === 0 && <div className="empty">暂无持仓</div>}
+        {unavailableN > 0 && (
+          <div className="empty" style={{ marginTop: 8 }}>
+            ⚠️ {unavailableN} 项持仓的实时行情/净值暂不可用，未计入下方合计（数据恢复后自动补算）。
+          </div>
+        )}
       </div>
 
       <div className="card">

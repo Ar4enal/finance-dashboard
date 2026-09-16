@@ -219,6 +219,12 @@ export default function Analysis() {
             <div className="m"><div className="l">当前持仓收益</div><div className={`v ${cls(summary?.totalHoldingPnl)}`}>{sign(summary?.totalHoldingPnl)}</div><div className="l">{sign(summary?.totalHoldingPnlPct)}%</div></div>
             <div className="m"><div className="l">累计收益（含已实现）</div><div className={`v ${cls(summary?.totalCumPnl)}`}>{sign(summary?.totalCumPnl)}</div></div>
           </div>
+          {/* v34：有持仓行情/净值取不到时明确提示未计入，避免四个数字互相对不上 */}
+          {summary?.unavailableCount > 0 && (
+            <div className="warn-bar" style={{ marginTop: 12, marginBottom: 0 }}>
+              ⚠️ {summary.unavailableCount} 项持仓的实时行情/净值暂不可用，已从上述指标中剔除。
+            </div>
+          )}
         </div>
       </div>
 

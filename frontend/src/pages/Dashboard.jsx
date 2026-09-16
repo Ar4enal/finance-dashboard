@@ -102,6 +102,10 @@ export default function Dashboard() {
       {summary && summary.goldAvailable === false && (
         <div className="warn-bar">⚠️ 实时国内金价暂不可用，实物黄金按成本价计入资产，盈亏数据暂缺。</div>
       )}
+      {/* v34：有持仓行情/净值取不到时，明确告知这几项未参与汇总，避免数字对不上让人以为是算错 */}
+      {summary && summary.unavailableCount > 0 && (
+        <div className="warn-bar">⚠️ {summary.unavailableCount} 项持仓的实时行情/净值暂不可用，已从总资产、总成本、当前持仓收益中剔除；数据恢复后自动补算。</div>
+      )}
       <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
         <div className="stat"><div className="label">总资产</div><div className="value">{money(summary?.totalMarketValue)}</div></div>
         <div className="stat"><div className="label">总成本</div><div className="value">{money(summary?.totalCost)}</div></div>
