@@ -231,7 +231,7 @@ export default function Analysis() {
       {/* 净值曲线（每日快照，随使用天数自然积累） */}
       <div className="card">
         <div className="card-title">净值曲线（每日快照）
-          <span className="pc-sub" style={{ marginLeft: 8, fontSize: 12 }}>组合页每天首次打开时自动记录当日快照，数据随使用天数积累</span>
+          <span className="pc-sub" style={{ marginLeft: 8, fontSize: 12 }}>每个交易日一条记录；当天随行情实时更新，当日最后一次刷新即为该日最终值</span>
         </div>
         {perf && perf.dates.length > 0 ? (
           <>
@@ -267,7 +267,7 @@ export default function Analysis() {
             </div>
           </>
         ) : (
-          <div className="empty">暂无净值快照。组合分析页每天首次打开时自动记录当日快照，数据积累后这里将展示净值曲线与最大回撤。</div>
+          <div className="empty">暂无净值快照。每个交易日自动记录一条组合市值，当天随行情实时更新；数据积累后将展示净值曲线与最大回撤。</div>
         )}
       </div>
 

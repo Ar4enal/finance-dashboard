@@ -1770,7 +1770,9 @@ def manual_add_position_batch(items: list = Body(..., description="持仓数组 
 def portfolio_performance(period: str = "all"):
     """组合净值曲线与回撤。
     period: all=全部快照（默认）/ 30=最近30条 / 90=最近90条。
-    快照由组合汇总接口每日首次计算时自动写入（snapshots 表，每日一条）。
+    快照由组合汇总接口自动写入（snapshots 表，每个交易日一条）；
+    v34.2 起当天那一条**随行情实时更新**（不再冻结在首次打开时刻），
+    故曲线最后一点恒等于页面上的实时总市值。
 
     v34：新增 cumPnl 序列 —— 每日「累计收益（含已实现）」，取自快照 total_cum_pnl 列
     （该列自 v32 起写入；更早的历史快照为 NULL）。NULL 一律保持 None 原样返回，
@@ -1811,7 +1813,7 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
     snaps = db.get_snapshots()
     if not snaps:
         return ok({"type": type, "range": range_val or "—", "combo_pnl": None, "combo_pnl_pct": None,
-                   "available": False, "note": "暂无净值快照，组合分析页每天首次打开会自动记录，积累后才有收益数据",
+                   "available": False, "note": "暂无净值快照，每个交易日自动记录一条组合市值，积累后才有收益数据",
                    "details": [], "calendar": []})
 
     today = db.today_str()

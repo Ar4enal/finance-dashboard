@@ -418,18 +418,23 @@ def save_snapshot(snap_date, market_value, cost, cash=0):
 
 
 def ensure_snapshot_today(market_value, cost, cum_pnl=None, cash=0):
-    """确保今天已有一条净值快照（幂等）。
-    组合分析/持仓页每次计算组合时调用：
-    - 当天首次调用写入（含累计收益 total_cum_pnl）；
-    - 若当天已存在但为旧版快照（total_cum_pnl 为 NULL，即修复前代码写入），
-      则按当前持仓重算并覆盖一次，使收益口径回归「基于当前持仓」；
-    - 其余情况保持冻结，保证总览收益锚定当日快照、不再随实时行情跳动。
+    """写入/更新今天的净值快照（每个交易日一条，**当天随行情实时更新**）。
+
+    v34.2：由「当天首次写入后冻结」改为「实时跟随」——
+    原实现只在当天首次打开时写一次，于是净值曲线**当天那一点永远是「当天首次打开时刻」
+    的旧值**，与页面上的实时总市值对不上（越晚差越大），页面里甚至同时出现两个不同的
+    「总市值」；且若当天首次打开发生在深夜或空仓时段，错误值会被冻结一整天
+    （实测 8/27 那条就写于 00:00:02）。
+    现在每次计算组合都把当天这一条更新为最新值，当天最后一次刷新即为该日最终值。
+
+    注：只影响「今天」这一条，历史日期永不改动；值未变化时不写库（轮询频繁，避免无谓写入）。
     """
     snap_date = today_str()
     conn = _connect()
     try:
         row = conn.execute(
-            "SELECT id, total_cum_pnl FROM snapshots WHERE snap_date=?", (snap_date,)
+            "SELECT id, total_market_value, total_cost, total_cum_pnl"
+            " FROM snapshots WHERE snap_date=?", (snap_date,)
         ).fetchone()
         if not row:
             conn.execute(
@@ -437,14 +442,19 @@ def ensure_snapshot_today(market_value, cost, cum_pnl=None, cash=0):
                 " VALUES(?,?,?,?,?)",
                 (snap_date, market_value, cost, cum_pnl, cash))
             conn.commit()
-        elif row["total_cum_pnl"] is None:
-            # 旧版快照缺累计收益列，用当前持仓重算覆盖一次，之后冻结
+            return
+        # 值未变化则不写库（前端按配置频率轮询，避免每次都产生一次 UPDATE）
+        same = (abs((row["total_market_value"] or 0) - market_value) < 0.005
+                and abs((row["total_cost"] or 0) - cost) < 0.005
+                and ((row["total_cum_pnl"] is None and cum_pnl is None)
+                     or (row["total_cum_pnl"] is not None and cum_pnl is not None
+                         and abs(row["total_cum_pnl"] - cum_pnl) < 0.005)))
+        if not same:
             conn.execute(
                 "UPDATE snapshots SET total_market_value=?, total_cost=?, total_cum_pnl=?, cash=?"
                 " WHERE id=?",
                 (market_value, cost, cum_pnl, cash, row["id"]))
             conn.commit()
-        # 否则：当天快照已存在且为完整新版 → 保持冻结，保证稳定
     finally:
         conn.close()
 
@@ -476,28 +486,42 @@ def today_str():
 
 # ---------------- 持仓级每日快照（收益分析用） ----------------
 def ensure_position_snapshots_today(items):
-    """确保今天已写入每个持仓的市值快照（幂等，按 (snap_date,market,code) 唯一）。
-    items: [(market, code, market_value), ...]，market_value 为 None 时跳过该持仓当天（行情不可用）。
-    组合分析/持仓页每次计算组合时调用：当天首次写入，之后不覆盖，保证按「每日一条」积累。"""
+    """写入/更新今天每个持仓的市值快照（每个交易日每持仓一条，**当天随行情实时更新**）。
+
+    v34.2：同样由「首次写入后不覆盖」改为实时更新，**与组合级快照保持同一时间基准**。
+    两张表若一个冻结、一个更新，同一天的「组合总市值」与「持仓明细合计」就会来自
+    不同时刻 —— 实测 8/27 正是如此（组合 353,183 vs 明细合计 424,433，差 71,250），
+    导致净值曲线与收益分析对不上。
+
+    items: [(market, code, market_value), ...]，market_value 为 None 时跳过该持仓
+    （行情不可用不记快照，避免脏 0）；已存在的行不删除，只更新数值。
+    """
     snap_date = today_str()
     conn = _connect()
     try:
-        existing = set(
-            (r["market"], r["code"])
-            for r in conn.execute(
-                "SELECT market,code FROM position_snapshots WHERE snap_date=?", (snap_date,)
-            ).fetchall()
-        )
+        cur = {(r["market"], r["code"]): r["market_value"]
+               for r in conn.execute(
+                   "SELECT market,code,market_value FROM position_snapshots WHERE snap_date=?",
+                   (snap_date,)).fetchall()}
+        changed = False
         for market, code, mv in items:
             if mv is None:
                 continue  # 行情不可用的持仓当天不记快照（避免脏 0）
-            if (market, code) in existing:
-                continue
-            conn.execute(
-                "INSERT INTO position_snapshots(snap_date,market,code,market_value)"
-                " VALUES(?,?,?,?)",
-                (snap_date, market, code, round(float(mv), 2)))
-        conn.commit()
+            v = round(float(mv), 2)
+            old = cur.get((market, code))
+            if old is None:
+                conn.execute(
+                    "INSERT INTO position_snapshots(snap_date,market,code,market_value)"
+                    " VALUES(?,?,?,?)", (snap_date, market, code, v))
+                changed = True
+            elif abs(old - v) >= 0.005:
+                conn.execute(
+                    "UPDATE position_snapshots SET market_value=?"
+                    " WHERE snap_date=? AND market=? AND code=?",
+                    (v, snap_date, market, code))
+                changed = True
+        if changed:
+            conn.commit()
     finally:
         conn.close()
 
