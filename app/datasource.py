@@ -815,6 +815,91 @@ def fund_kline(fund_code, count=120):
     return {"dates": dates, "ohlc": ohlc, "volume": volume}
 
 
+def fund_nav_on_date(fund_code, request_date, time_slot="before"):
+    """按交易日取场外基金单位净值（v35 需求1）。
+
+    成交规则（与基金公司实际一致）：
+      - 15:00 前申请 → 按「申请日」净值成交；若申请日为非交易日，顺延至下一交易日；
+      - 15:00 后申请 → 顺延至下一交易日成交。
+
+    返回 dict：
+      code / request_date / nav_date / nav / available / reason / message
+      latest_nav_date / latest_nav / holiday_covered
+    reason 取值：
+      'ok'            正常取到
+      'future'        净值对应交易日尚未到来
+      'not_published' 该日已到（或已过）但净值尚未公布
+      'no_data'       未找到该日净值（基金尚未成立 / 该日无净值）
+      'source_error'  数据源请求失败（可稍后重试）
+      'error'         入参无效（代码为空 / 日期格式错误）
+    绝不臆造价格：取不到时 nav 为 None，前端据此留空并提示。
+    """
+    code = re.sub(r'^fu_', '', str(fund_code or '')).strip()
+    dt = _parse_date(request_date)
+    out = {"code": code, "request_date": request_date, "nav_date": request_date,
+           "nav": None, "available": False, "reason": "error", "message": "",
+           "latest_nav_date": "", "latest_nav": None, "holiday_covered": False}
+    if not code:
+        out["message"] = "基金代码为空"
+        return out
+    if dt is None:
+        out["message"] = "交易日期无效（应为 YYYY-MM-DD）"
+        return out
+
+    # 1) 依 15:00 规则确定「净值对应交易日」
+    is_td, covered = is_cn_trading_day(request_date)
+    nav_date = request_date
+    if str(time_slot).lower() == "after" or not is_td:
+        nav_date, cov2 = next_cn_trading_day(request_date, 1)
+        covered = bool(covered and cov2)
+    out["nav_date"] = nav_date
+    out["holiday_covered"] = covered
+
+    # 2) 拉历史净值序列
+    try:
+        rows = _fund_net_worth_trend(code)
+    except DataSourceError as e:
+        out["reason"] = "source_error"
+        out["message"] = "基金净值数据源获取失败：%s" % str(e)
+        return out
+    if not rows:
+        out["reason"] = "no_data"
+        out["message"] = "未获取到该基金的净值数据"
+        return out
+
+    nav_map = {}
+    for r in rows:
+        d = time.strftime("%Y-%m-%d", time.localtime(r["x"] / 1000))
+        nav_map[d] = float(r["y"])
+    latest_date = time.strftime("%Y-%m-%d", time.localtime(rows[-1]["x"] / 1000))
+    out["latest_nav_date"] = latest_date
+    out["latest_nav"] = round(float(rows[-1]["y"]), 4)
+
+    # 3) 匹配该交易日净值
+    nav = nav_map.get(nav_date)
+    today = time.strftime("%Y-%m-%d")
+    if nav is not None:
+        out["nav"] = round(nav, 4)
+        out["available"] = True
+        out["reason"] = "ok"
+        return out
+
+    if nav_date > today:
+        out["reason"] = "future"
+        out["message"] = ("净值对应交易日 %s 尚未到来，该日净值公布后重新录入即可自动回填"
+                          % nav_date)
+    elif nav_date > latest_date:
+        out["reason"] = "not_published"
+        out["message"] = ("%s 的净值尚未公布（基金净值通常在交易日收盘后当晚更新，"
+                          "QDII 可能再延迟 1～2 个交易日），请稍后重录或手动填写"
+                          % nav_date)
+    else:
+        out["reason"] = "no_data"
+        out["message"] = ("未找到 %s 在 %s 的净值数据（该基金可能尚未成立，或当日无净值）"
+                          % (code, nav_date))
+    return out
+
+
 def fund_recent_avg_return(fund_code, n=20):
     """基金近 n 个交易日的平均日涨跌%（取净值历史 equityReturn 的均值）。
     用于低覆盖率穿透时对未覆盖持仓做"中性化"补充，避免把未覆盖部分当 0 涨跌。"""

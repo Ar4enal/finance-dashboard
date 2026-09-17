@@ -241,6 +241,18 @@ th.sortable .sort-arr { color: var(--accent); font-size: 11px; margin-left: 2px;
 .fund-confirm-hint { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; color: var(--muted); cursor: default; }
 
 /* =========================================================
+   v35 需求1：场外基金交易价格自动取自「净值对应交易日」的官方净值
+   ========================================================= */
+/* 「自动 / 手动」来源标记 */
+.nav-src-tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px; font-size: 11px; line-height: 16px; font-weight: 600; vertical-align: middle; }
+.nav-src-tag.auto { background: rgba(63,185,80,.15); color: #3fb950; border: 1px solid rgba(63,185,80,.4); }
+.nav-src-tag.manual { background: rgba(210,153,34,.15); color: #d29922; border: 1px solid rgba(210,153,34,.45); }
+/* 净值来源 / 不可用原因提示 */
+.nav-hint { margin-top: 5px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.nav-hint.ok { color: #3fb950; }
+.nav-hint.warn { color: #d29922; }
+
+/* =========================================================
    v20 新增样式
    ========================================================= */
 

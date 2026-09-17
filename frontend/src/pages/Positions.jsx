@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import ProfitDisplay from '../components/ProfitDisplay.jsx'
 import { api } from '../api.js'
 import { useInputHistory, clearHistory, loadHistory } from '../history.js'
@@ -385,6 +385,13 @@ export default function Positions() {
   // 后端基于真实休市安排（沪深北交易所官方公告）跳过周末与法定节假日；
   // QDII 恒为 T+2，境内基金按 15:00 前后分 T+1 / T+2。
   const [fundConfirm, setFundConfirm] = useState({ confirm_date: '—', rule: '', available: true, holiday_note: '' })
+  // v35 需求1：场外基金交易「价格」按交易日自动获取并回填
+  //   navAuto   = 接口返回的净值信息（含净值对应交易日、失败原因）
+  //   priceManualRef = 价格是否由用户手动填写；为 true 时自动净值不再覆盖它
+  //   priceManual（同名 state）仅用于驱动界面上的「自动/手动」标记
+  const [navAuto, setNavAuto] = useState({ available: false, nav: null, nav_date: '', reason: '', message: '', latest_nav_date: '', latest_nav: null, inmarket: false, holiday_covered: true })
+  const [priceManual, setPriceManual] = useState(false)
+  const priceManualRef = useRef(false)
   const fundConfirmDate = fundConfirm.confirm_date
   // 基金确认规则文案（本地同步用于备注/显示，供用户即时参考；最终日期以后端为准）
   const fundTPlus = isQdii ? 2 : (form.fund_time === 'after' ? 2 : 1)
@@ -400,6 +407,48 @@ export default function Positions() {
       .catch(() => { if (alive) setFundConfirm({ confirm_date: '—', rule: '', available: false, holiday_note: '确认份额日期获取失败，请手动核对' }) })
     return () => { alive = false }
   }, [isFundTxn, form.trans_date, isQdii, form.fund_time])
+
+  // v35 需求1：场外基金交易价格 = 「净值对应交易日」的官方单位净值，自动获取并回填。
+  // 净值对应交易日由后端依 15:00 规则换算（15:00 前=申请日，非交易日顺延；15:00 后=下一交易日）。
+  // 仅在场外基金、且用户未手动改过价格时回填；取不到净值时**留空并提示，绝不估算填充**。
+  useEffect(() => {
+    const emptyNav = { available: false, nav: null, nav_date: '', reason: '', message: '', latest_nav_date: '', latest_nav: null, inmarket: false, holiday_covered: true }
+    // 基金代码为 6 位数字才请求：避免用户逐字输入时产生大量无谓请求
+    if (!isFundTxn || !/^\d{6}$/.test(String(form.code || '').trim()) || !form.trans_date) {
+      setNavAuto(emptyNav)
+      return
+    }
+    let alive = true
+    // 防抖 500ms：停止输入后才发一次请求
+    const timer = setTimeout(() => {
+      api.fundNavByDate(form.code, form.trans_date, form.fund_time)
+        .then(r => {
+          if (!alive) return
+          const info = {
+            available: !!r.available, nav: r.nav, nav_date: r.nav_date || '',
+            reason: r.reason || '', message: r.message || '',
+            latest_nav_date: r.latest_nav_date || '', latest_nav: r.latest_nav,
+            inmarket: !!r.inmarket, holiday_covered: !!r.holiday_covered,
+          }
+          setNavAuto(info)
+          // 自动回填：取到净值、非场内基金、且价格未被用户手改
+          if (info.available && info.nav != null && !info.inmarket && !priceManualRef.current) {
+            setForm(f => (f.price === String(info.nav) ? f : { ...f, price: String(info.nav) }))
+          }
+        })
+        .catch(() => { if (alive) setNavAuto({ available: false, nav: null, nav_date: '', reason: 'request_failed', message: '净值获取失败，请手动填写价格', latest_nav_date: '', latest_nav: null, inmarket: false, holiday_covered: true }) })
+    }, 500)
+    return () => { alive = false; clearTimeout(timer) }
+  }, [isFundTxn, form.code, form.trans_date, form.fund_time])
+
+  // 交易日期或 15:00 时段变化 → 基金价格必须跟着重定：清空并按新交易日重新自动获取。
+  // 非基金市场不受影响（价格仍由用户填写，改日期不动价格）。
+  const onFundDateOrSlotChange = (patch) => {
+    if (!isFundTxn) { setForm(f => ({ ...f, ...patch })); return }
+    priceManualRef.current = false
+    setPriceManual(false)
+    setForm(f => ({ ...f, ...patch, price: '' }))
+  }
 
   // 录入/编辑基金时，自动判断该代码是否为 QDII（非国内）基金（内置清单）
   const checkQdii = async (code) => {
@@ -441,7 +490,8 @@ export default function Positions() {
   }
 
   const submit = async () => {
-    if (!form.code || !form.quantity || !form.price) { alert('请填写代码、数量、价格'); return }
+    if (!form.code || !form.quantity) { alert(isFundTxn ? '请填写基金代码与交易份额' : '请填写代码与数量'); return }
+    if (!form.price) { alert(isFundTxn ? '该笔基金交易的净值不可用（尚未公布或无数据），请稍后重新录入，或手动填写价格' : '请填写价格'); return }
     const marketMap = { 'A股': 'A', '美股': 'US', '港股': 'HK', '黄金': 'GOLD', '基金': 'FUND', '债券': 'BOND' }
     // 基金：把交易时间与确认份额日期（含 QDII 判定）写入备注，便于追溯
     let note = form.note || ''
@@ -461,6 +511,7 @@ export default function Positions() {
       setShowForm(false)
       setForm({ market: 'A股', code: '', side: 'BUY', quantity: '', price: '', fee: 0, trans_date: new Date().toISOString().split('T')[0], note: '', fund_time: 'before' })
       setQdiiAuto(false); setQdiiManual(false)
+      priceManualRef.current = false; setPriceManual(false)
       fetchData()
     } catch (e) { alert(e.message) }
   }
@@ -470,6 +521,9 @@ export default function Positions() {
     const marketMapRev = { A: 'A股', US: '美股', HK: '港股', GOLD: '黄金', FUND: '基金', BOND: '债券' }
     setEditTxn(t)
     setQdiiAuto(false); setQdiiManual(false)
+    // 编辑已有交易：保留记录里的原始价格，不自动覆盖（用户改动日期/时段后会重新自动获取）
+    priceManualRef.current = true
+    setPriceManual(true)
     // 从交易备注里还原 15:00 前后标记（录入时写入了「15:00前/15:00后/QDII基金」标签）
     const note = t.note || ''
     const fundTime = /15:00后/.test(note) ? 'after' : 'before'
@@ -488,7 +542,8 @@ export default function Positions() {
 
   // 保存编辑交易
   const saveEdit = async () => {
-    if (!form.code || !form.quantity || !form.price) { alert('请填写代码、数量、价格'); return }
+    if (!form.code || !form.quantity) { alert(isFundTxn ? '请填写基金代码与交易份额' : '请填写代码与数量'); return }
+    if (!form.price) { alert(isFundTxn ? '该笔基金交易的净值不可用（尚未公布或无数据），请稍后重新录入，或手动填写价格' : '请填写价格'); return }
     const marketMap = { 'A股': 'A', '美股': 'US', '港股': 'HK', '黄金': 'GOLD', '基金': 'FUND', '债券': 'BOND' }
     try {
       await api.updateTxn(editTxn.id, {
@@ -503,6 +558,7 @@ export default function Positions() {
       })
       setEditTxn(null)
       setForm({ market: 'A股', code: '', side: 'BUY', quantity: '', price: '', fee: 0, trans_date: new Date().toISOString().split('T')[0], note: '' })
+      priceManualRef.current = false; setPriceManual(false)
       fetchData()
     } catch (e) { alert(e.message) }
   }
@@ -1030,15 +1086,39 @@ export default function Positions() {
             </div>
             <div className="form-row">
               <div><div className="form-label">数量</div><HistInput field="txn:qty" type="number" value={form.quantity} onChange={v => setForm({ ...form, quantity: v })} /></div>
-              <div><div className="form-label">价格</div><HistInput field="txn:price" type="number" value={form.price} onChange={v => setForm({ ...form, price: v })} /></div>
+              <div>
+                <div className="form-label">
+                  价格{isFundTxn ? '（单位净值）' : ''}
+                  {isFundTxn && form.price && !navAuto.inmarket && !priceManual && <span className="nav-src-tag auto" title="由该交易日的官方基金净值自动填入">自动</span>}
+                  {isFundTxn && form.price && priceManual && <span className="nav-src-tag manual" title="由你手动填写，不再随日期自动变更">手动</span>}
+                </div>
+                <HistInput field="txn:price" type="number" value={form.price}
+                  onChange={v => { if (isFundTxn) { priceManualRef.current = true; setPriceManual(true) } setForm({ ...form, price: v }) }}
+                  placeholder={isFundTxn && !navAuto.available ? '净值不可用，请手动填写' : ''} />
+                {isFundTxn && (
+                  navAuto.inmarket ? (
+                    <div className="nav-hint warn">⚠️ 场内基金（ETF/LOF）按实时成交价买卖，不适用场外净值口径，请手动填写价格</div>
+                  ) : !/^\d{6}$/.test(String(form.code || '').trim()) ? (
+                    <div className="nav-hint">填写 6 位基金代码后，将按交易日自动带出官方单位净值</div>
+                  ) : navAuto.available ? (
+                    <div className="nav-hint ok">
+                      已按交易日自动填入 —— 净值对应交易日 <b>{navAuto.nav_date}</b>，单位净值 <b>{pfmt(navAuto.nav, 'FUND')}</b>
+                      {navAuto.nav_date !== form.trans_date && <span style={{ color: 'var(--muted)' }}>（依 15:00 规则自 {form.trans_date} 顺延至该交易日）</span>}
+                      {!navAuto.holiday_covered && <span style={{ color: '#e8a33d' }}> · 休市安排待更新，仅跳过周末</span>}
+                    </div>
+                  ) : navAuto.reason ? (
+                    <div className="nav-hint warn">⚠️ {navAuto.message || '该交易日净值不可用，请手动填写价格'}</div>
+                  ) : null
+                )}
+              </div>
               <div><div className="form-label">手续费</div><HistInput field="txn:fee" type="number" value={form.fee} onChange={v => setForm({ ...form, fee: v })} /></div>
-              <div><div className="form-label">日期</div><input className="form-input" type="date" value={form.trans_date} onChange={e => setForm({ ...form, trans_date: e.target.value })} /></div>
+              <div><div className="form-label">日期</div><input className="form-input" type="date" value={form.trans_date} onChange={e => onFundDateOrSlotChange({ trans_date: e.target.value })} /></div>
             </div>
             <div className="form-row"><div><div className="form-label">备注</div><input className="form-input" value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} /></div></div>
             {showFundTime && (
               <div className="form-row" style={{ marginTop: 8 }}>
                 <div><div className="form-label">交易时间{isQdii ? '（QDII 仅作记录）' : ''}</div>
-                  <select className="form-input" value={form.fund_time} onChange={e => setForm({ ...form, fund_time: e.target.value })}>
+                  <select className="form-input" value={form.fund_time} onChange={e => onFundDateOrSlotChange({ fund_time: e.target.value })}>
                     <option value="before">15:00 之前</option>
                     <option value="after">15:00 之后</option>
                   </select></div>
@@ -1092,15 +1172,39 @@ export default function Positions() {
             </div>
             <div className="form-row">
               <div><div className="form-label">数量</div><HistInput field="txn:qty" type="number" value={form.quantity} onChange={v => setForm({ ...form, quantity: v })} /></div>
-              <div><div className="form-label">价格</div><HistInput field="txn:price" type="number" value={form.price} onChange={v => setForm({ ...form, price: v })} /></div>
+              <div>
+                <div className="form-label">
+                  价格{isFundTxn ? '（单位净值）' : ''}
+                  {isFundTxn && form.price && !navAuto.inmarket && !priceManual && <span className="nav-src-tag auto" title="由该交易日的官方基金净值自动填入">自动</span>}
+                  {isFundTxn && form.price && priceManual && <span className="nav-src-tag manual" title="由你手动填写，不再随日期自动变更">手动</span>}
+                </div>
+                <HistInput field="txn:price" type="number" value={form.price}
+                  onChange={v => { if (isFundTxn) { priceManualRef.current = true; setPriceManual(true) } setForm({ ...form, price: v }) }}
+                  placeholder={isFundTxn && !navAuto.available ? '净值不可用，请手动填写' : ''} />
+                {isFundTxn && (
+                  navAuto.inmarket ? (
+                    <div className="nav-hint warn">⚠️ 场内基金（ETF/LOF）按实时成交价买卖，不适用场外净值口径，请手动填写价格</div>
+                  ) : !/^\d{6}$/.test(String(form.code || '').trim()) ? (
+                    <div className="nav-hint">填写 6 位基金代码后，将按交易日自动带出官方单位净值</div>
+                  ) : navAuto.available ? (
+                    <div className="nav-hint ok">
+                      已按交易日自动填入 —— 净值对应交易日 <b>{navAuto.nav_date}</b>，单位净值 <b>{pfmt(navAuto.nav, 'FUND')}</b>
+                      {navAuto.nav_date !== form.trans_date && <span style={{ color: 'var(--muted)' }}>（依 15:00 规则自 {form.trans_date} 顺延至该交易日）</span>}
+                      {!navAuto.holiday_covered && <span style={{ color: '#e8a33d' }}> · 休市安排待更新，仅跳过周末</span>}
+                    </div>
+                  ) : navAuto.reason ? (
+                    <div className="nav-hint warn">⚠️ {navAuto.message || '该交易日净值不可用，请手动填写价格'}</div>
+                  ) : null
+                )}
+              </div>
               <div><div className="form-label">手续费</div><HistInput field="txn:fee" type="number" value={form.fee} onChange={v => setForm({ ...form, fee: v })} /></div>
-              <div><div className="form-label">日期</div><input className="form-input" type="date" value={form.trans_date} onChange={e => setForm({ ...form, trans_date: e.target.value })} /></div>
+              <div><div className="form-label">日期</div><input className="form-input" type="date" value={form.trans_date} onChange={e => onFundDateOrSlotChange({ trans_date: e.target.value })} /></div>
             </div>
             <div className="form-row"><div><div className="form-label">备注</div><input className="form-input" value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} /></div></div>
             {editTxn && editTxn.market === 'FUND' && (
               <div className="form-row" style={{ marginTop: 8 }}>
                 <div><div className="form-label">交易时间{isQdii ? '（QDII 仅作记录）' : ''}</div>
-                  <select className="form-input" value={form.fund_time} onChange={e => setForm({ ...form, fund_time: e.target.value })}>
+                  <select className="form-input" value={form.fund_time} onChange={e => onFundDateOrSlotChange({ fund_time: e.target.value })}>
                     <option value="before">15:00 之前</option>
                     <option value="after">15:00 之后</option>
                   </select></div>

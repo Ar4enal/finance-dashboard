@@ -582,6 +582,27 @@ def fund_confirm_date(trans_date: str, qdii: bool = False, time: str = "before")
     })
 
 
+@app.get("/api/fund/nav-by-date")
+def fund_nav_by_date(code: str, trans_date: str, time: str = "before"):
+    """按交易日获取场外基金单位净值（v35 需求1）。
+
+    依 15:00 规则把「交易日期」换算为「净值对应交易日」：
+      - 15:00 前 → 申请日当日净值（申请日为非交易日则顺延至下一交易日）
+      - 15:00 后 → 下一交易日净值（跳过周末与官方休市日）
+    数据源为天天基金真实历史净值序列；**取不到时不返回任何估算值**，
+    以 available=False + reason + message 明示原因。
+
+    返回 {code, request_date, nav_date, nav, available, reason, message,
+          latest_nav_date, latest_nav, holiday_covered, inmarket}
+    """
+    r = ds.fund_nav_on_date(code, trans_date, time)
+    if r.get("reason") == "error":
+        return fail(r.get("message") or "参数错误")
+    # 场内基金（ETF/LOF）按实时价成交，不适用净值口径 → 前端据此退回手工填写
+    r["inmarket"] = ds._is_inmarket_fund(r.get("code") or code)
+    return ok(r)
+
+
 @app.get("/api/fund/penetration/holdings")
 def penetration_holdings():
     """遍历用户持仓中的基金（交易记录 market=FUND + 新增持仓 position_override 的 FUND），

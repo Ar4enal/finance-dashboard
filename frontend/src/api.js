@@ -25,6 +25,8 @@ export const api = {
   fundQdiiCheck: (code) => request(`/api/fund/qdii/check?code=${encodeURIComponent(code)}`),
   // 基金确认份额日期（跳过周末与官方休市日）：qdii=是否非国内基金，time=before/after(15:00前后)
   fundConfirmDate: (transDate, qdii, time) => request(`/api/fund/confirm-date?trans_date=${encodeURIComponent(transDate)}&qdii=${!!qdii}&time=${time || 'before'}`),
+  // 按交易日取场外基金单位净值（v35）：依 15:00 规则换算净值对应交易日，取不到时 available=false + reason
+  fundNavByDate: (code, transDate, time) => request(`/api/fund/nav-by-date?code=${encodeURIComponent(code)}&trans_date=${encodeURIComponent(transDate)}&time=${time || 'before'}`),
   // 自选
   watchlist: () => request('/api/watchlist'),
   addWatch: (market, code, name) => request(`/api/watchlist?market=${market}&code=${code}${name ? '&name=' + encodeURIComponent(name) : ''}`, { method: 'POST' }),
