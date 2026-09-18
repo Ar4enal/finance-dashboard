@@ -8,6 +8,9 @@ const fmt = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('zh-CN',
 const money = (n) => (n == null ? '—' : '¥' + fmt(n, 0))
 const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '')
 const sign = (n) => (n == null ? '—' : (n > 0 ? '+' : '') + fmt(n))
+// v36.3：区间净投入展示 —— 正=净买入、负=净收回。刻意不用正负色：它是「钱的进出」而不是盈亏。
+const investTxt = (n) => (n == null || Math.abs(n) < 0.005 ? '—'
+  : (n < 0 ? '-' : '') + '¥' + fmt(Math.abs(n), 0))
 
 // v34：净值曲线 tooltip —— 日期 + 三条线金额（千分位；空值显示「—」，不虚构）
 const perfTipFmt = (ps) => {
@@ -321,15 +324,26 @@ export default function Analysis() {
             ) : (
               <EChart className="chart-md" option={buildBarOption(pnl)} />
             )}
-            {/* 收益明细：每个持仓在区间内的收益（区间收益列可编辑） */}
-            <div className="card-title" style={{ marginTop: 14, fontSize: 14 }}>收益明细（每个持仓在区间内收益，点击数值可编辑）</div>
+            {/* 收益明细：每个持仓在区间内的净投入 / 已实现收益 / 区间收益（区间收益列可编辑） */}
+            <div className="card-title" style={{ marginTop: 14, fontSize: 14 }}>收益明细（区间内净投入 · 已实现收益 · 区间收益；区间收益可点击编辑）</div>
             <table className="pnl-detail">
-              <thead><tr><th>市场</th><th>代码</th><th>名称</th><th className="num">区间收益（可编辑）</th></tr></thead>
+              <thead><tr>
+                <th>市场</th><th>代码</th><th>名称</th>
+                <th className="num" title="区间内「买入金额 + 买入手续费 − 卖出金额 + 卖出手续费」。正数=净买入（投入），负数=净收回（卖出）；它只是钱的进出，不是盈亏">净投入</th>
+                <th className="num" title="区间内卖出相对成本赚到的部分 = Σ(卖出价 − 卖出前移动加权均价) × 卖出量 − 卖出手续费；已包含在「区间收益」中，此处单列便于核对">已实现收益</th>
+                <th className="num">区间收益（可编辑）</th>
+              </tr></thead>
               <tbody>
-                {pnl.details.length === 0 && <tr><td colSpan={4} className="am-empty">该区间无持仓收益明细（可能持仓快照不足或区间内无交易）</td></tr>}
+                {pnl.details.length === 0 && <tr><td colSpan={6} className="am-empty">该区间无持仓收益明细（可能持仓快照不足或区间内无交易）</td></tr>}
                 {pnl.details.map((d, i) => (
                   <tr key={i}>
                     <td>{d.market}</td><td>{d.code}</td><td style={{ cursor: 'pointer' }} onClick={() => openKline(d.market, d.code, d.name)} title="点击查看 K 线行情">{d.name}</td>
+                    <td className="num" style={{ color: 'var(--muted)' }} title={d.netInvest ? (d.netInvest > 0 ? '区间内净买入（投入）' : '区间内净收回（卖出）') : '区间内无买卖'}>
+                      {investTxt(d.netInvest)}
+                    </td>
+                    <td className={`num ${cls(d.realizedPnl)}`} title={Math.abs(d.realizedPnl || 0) < 0.005 ? '区间内无卖出或卖出未产生已实现盈亏' : '卖出相对成本赚到的部分'}>
+                      {Math.abs(d.realizedPnl || 0) < 0.005 ? '—' : sign(d.realizedPnl)}
+                    </td>
                     <td className="num">
                       <input className={`pnl-edit ${cls(d.pnl)}`} type="text" inputMode="decimal" defaultValue={pnlInputVal(d.pnl)}
                         key={`${d.market}-${d.code}-${pnlType}-${pnl.range}-${d.pnl}`}

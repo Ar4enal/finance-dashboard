@@ -1232,10 +1232,102 @@ def compute_realized_pnl():
     return realized
 
 
+def daily_cashflow_and_realized():
+    """按日聚合「买卖现金流」与「已实现收益」，供收益分析剔除交易对市值的影响（v36.2）。
+
+    背景（本次修复的缺陷）
+    ----------------------
+    收益分析的「区间收益」原为「期末市值 − 期初市值」。但买卖交易会直接改变市值：
+    录入一笔卖出后当日市值下降，这段下降被当成**亏损**（实际是收回资金，不是亏损）；
+    买入同理会把投入的钱当成收益。手工持仓没有买入流水，但一旦开始录交易就会暴露。
+
+    口径（已与用户确认，参照券商 App「当日盈亏」）
+    ----------------------------------------------
+        区间收益 = (期末市值 − 期初市值) − 区间净投入 + 区间已实现收益
+      · 净投入   = Σ(买入金额 + 买入手续费) − Σ(卖出金额 − 卖出手续费)
+      · 已实现收益 = Σ(卖出价 − 卖出前移动加权均价) × 卖出量 − 卖出手续费
+    即：剔除「钱的进出」，剩下的是行情涨跌；再把卖出相对成本赚到的部分加回来。
+
+    返回 (flows, realized, sells)：
+      flows    {(market, code): {date: 净投入}}
+      realized {(market, code): {date: 已实现收益}}   v36.3 起用于收益明细展示
+      sells    {(market, code): {date: True}}        该日发生过卖出，供「清仓当天按市值 0 计」判断
+
+    覆盖范围：`transactions`（**跳过待确认交易**，价格未知无法计算）与
+    `gold_transactions`（映射到 GOLD/GOLD_PHYSICAL）。
+    ⚠️ 手工持仓基准 `_po_baseline_txns()` **参与重放以确定卖出前均价**（否则均价为 0，
+    卖出会被算成全额收益），但**不计入净投入** —— 它是「成本基准」而非用户当日实际出资，
+    若计入会把用户编辑持仓时的市值跳变误当成一笔投入。
+    """
+    flows, realized, sells = {}, {}, {}
+
+    def _add(book, key, date, amt):
+        if not date or abs(amt) < 1e-9:
+            return
+        book.setdefault(key, {})
+        book[key][date] = round(book[key].get(date, 0.0) + amt, 2)
+
+    def _mark_sell(key, date):
+        if date:
+            sells.setdefault(key, {})[date] = True
+
+    # ---- 1) 股票 / 基金 / 债券等：transactions 表（含手工持仓基准参与重放）----
+    groups = {}
+    for t in get_transactions() + _po_baseline_txns():
+        groups.setdefault((t["market"], t["code"]), []).append(t)
+    for key, ts in groups.items():
+        ts = sorted(ts, key=lambda x: (x["trans_date"], x["id"]))
+        qty, cost = 0.0, 0.0
+        for t in ts:
+            # 待确认交易价格未知 → 不参与（回填后再计入）
+            if t.get("price_status") == "pending" or t.get("price") is None:
+                continue
+            q = float(t.get("quantity") or 0)
+            price = float(t.get("price") or 0)
+            fee = float(t.get("fee") or 0)
+            d = str(t.get("trans_date") or "")
+            if t["side"] == "BUY":
+                qty += q
+                cost += q * price + fee
+                if t.get("id") != -1:  # id=-1 为手工持仓基准：不计入实际出资
+                    _add(flows, key, d, q * price + fee)
+            elif qty > 1e-9 and q > 0:
+                avg = cost / qty
+                sell_qty = min(q, qty)
+                _add(realized, key, d, (price - avg) * sell_qty - fee)
+                _add(flows, key, d, -(price * sell_qty - fee))
+                _mark_sell(key, d)
+                cost -= avg * sell_qty
+                qty -= sell_qty
+
+    # ---- 2) 实物黄金：gold_transactions 表（无手续费）----
+    GKEY = ("GOLD", "GOLD_PHYSICAL")
+    gq, gcost = 0.0, 0.0
+    for t in get_gold_txns():
+        q = float(t.get("grams") or 0)
+        price = float(t.get("price") or 0)
+        d = str(t.get("trans_date") or "")
+        if t["side"] == "BUY":
+            gq += q
+            gcost += q * price
+            _add(flows, GKEY, d, q * price)
+        elif gq > 1e-9 and q > 0:
+            gavg = gcost / gq
+            gsq = min(q, gq)
+            _add(realized, GKEY, d, (price - gavg) * gsq)
+            _add(flows, GKEY, d, -(price * gsq))
+            _mark_sell(GKEY, d)
+            gcost -= gavg * gsq
+            gq -= gsq
+
+    return flows, realized, sells
+
+
 # =========================================================
 # 数据导入导出（跨机器迁移持仓/自选/交易等全部用户数据）
 # 数据结构：export_all_data() 返回的 dict，import_all_data(payload) 恢复。
 # =========================================================
+
 def export_all_data():
     """导出全部用户数据为一个 dict（含版本号，便于导入端校验）。"""
     payload = {

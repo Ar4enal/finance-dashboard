@@ -1967,8 +1967,28 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
     # 视为该日收益单元的最终值，向上聚合到 month/year/cum，并同步到日历图。
     names = { (p.get("market"), p.get("code")): p.get("name") or p.get("code")
               for p in _positions_data_cached() }  # v33：3s 共享缓存
+    # v36.2：买卖现金流 —— 区间收益需剔除「钱的进出」，否则录入卖出后当日市值下降
+    # 会被当成亏损（实际是收回资金）。见 db.daily_cashflow_and_realized()。
+    # ⚠️ realized_map（按日已实现收益）**不参与 pnl 计算**：已实现部分已包含在
+    #    「Δ市值 − 净投入」中，再加一次会重复计算；它仅用于收益明细展示（v36.3）。
+    flows, realized_map, sells = db.daily_cashflow_and_realized()
+
+    def _flow_in(book, key, lo, hi):
+        """区间 (lo, hi] 内的金额合计（左开右闭：每笔交易只归属唯一一个区间）。"""
+        d = book.get(key)
+        if not d:
+            return 0.0
+        return sum(v for dt, v in d.items() if lo < dt <= hi)
+
+    def _has_sell(key, lo, hi):
+        """该持仓在区间 (lo, hi] 内是否发生过卖出（v36.3：用于识别「清仓当天」）。"""
+        d = sells.get(key)
+        return bool(d) and any(lo < dt <= hi for dt in d)
+
     combo_pnl = 0.0
-    pos_pnl = {}  # (market, code) -> 区间内日收益累加
+    pos_pnl = {}       # (market, code) -> 区间内日收益累加
+    pos_invest = {}    # v36.3：(market, code) -> 区间净投入（正=净买入，负=净收回，仅供展示）
+    pos_realized = {}  # v36.3：(market, code) -> 区间已实现收益（卖出相对成本赚到的部分）
     cal = []      # 每日组合收益（日历图用）
     for prev, cur in pairs:
         day_date = cur["snap_date"]
@@ -1980,13 +2000,29 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
             pv = prev_items.get(k)
             cv = cur_items.get(k)
             if pv is None or cv is None:
-                continue  # 该持仓当天无快照（如行情不可用/新买入），跳过该日以免误导
+                # v36.3：**清仓当天** —— 已清仓行不记快照（market_value 为 None），
+                # 该持仓当天在 cur 侧缺失，整块区间收益会丢失。此时若区间内发生过卖出，
+                # 期末市值按 0 计（持仓确实已归零），收益自动等于「卖出收入 − 期初市值」。
+                if cv is None and pv is not None and _has_sell(k, prev["snap_date"], day_date):
+                    cv = 0.0
+                else:
+                    continue  # 其余缺失（行情不可用 / 新买入首日）跳过，避免把缺失当 0 产生虚假盈亏
+            flow = _flow_in(flows, k, prev["snap_date"], day_date)
+            rz = _flow_in(realized_map, k, prev["snap_date"], day_date)
             base = round(cv - pv, 2)
+            # v36.2：剔除区间内的买卖净投入 —— 买入投入的钱不是收益、卖出收回的钱不是亏损。
+            #   ⚠️ 不要再单独加回「卖出已实现收益」：它**已经天然包含**在「Δ市值 − 净投入」里。
+            #   推导（净值 10→11、卖 200 份 @11）：Δmv = −1200 = −(200×11) + 800×1，
+            #   净投入 = −2200 → 收益 = 1000 = 1000 份 × 1 元涨幅（含已实现 200 + 浮盈 800）。
+            #   再加一次已实现就会算成 1200，属重复计算。
+            base = round(base - flow, 2)
             # v27：套用该持仓该日的 day 覆盖（编辑日收益联动月/年/累计 + 日历图）
             ov_day = db.get_pnl_override(k[0], k[1], "day", day_date)
             if ov_day and ov_day.get("detail_pnl") is not None:
                 base = round(ov_day["detail_pnl"], 2)
             pos_pnl[k] = round(pos_pnl.get(k, 0.0) + base, 2)
+            pos_invest[k] = round(pos_invest.get(k, 0.0) + flow, 2)
+            pos_realized[k] = round(pos_realized.get(k, 0.0) + rz, 2)
             day_combo = round(day_combo + base, 2)
         # v27：套用组合级 day 覆盖（直接设定当日组合收益）
         combo_ov_day = db.get_pnl_override(db.COMBO_CODE, db.COMBO_CODE, "day", day_date)
@@ -2006,10 +2042,13 @@ def pnl_analysis(type: str = "day", range_val: str = ""):
     combo_pnl_pct = round(combo_pnl / combo_start * 100, 2) if combo_start else 0.0
 
     # 明细：每个持仓区间内日收益累加（与 combo 自洽）
+    #   v36.3 起同时给出该持仓在区间内的「净投入」与「已实现收益」，供前端展示
     details = [{
         "market": k[0], "code": k[1],
         "name": names.get(k, k[1]),
         "pnl": round(v, 2),
+        "netInvest": round(pos_invest.get(k, 0.0), 2),
+        "realizedPnl": round(pos_realized.get(k, 0.0), 2),
     } for k, v in pos_pnl.items()]
     # 套用用户编辑覆盖（每个持仓在某类型+范围下的收益）
     for d in details:
