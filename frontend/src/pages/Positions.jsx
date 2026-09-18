@@ -2,6 +2,11 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import ProfitDisplay from '../components/ProfitDisplay.jsx'
 import { api } from '../api.js'
 import { useInputHistory, clearHistory, loadHistory } from '../history.js'
+
+// v36.1：待确认交易超过该自然日数仍未取到净值 → 判为「超时」，页面顶部红色警示 + 列表红标。
+// 取 7 天：QDII 净值本身会滞后 1～2 个交易日，叠加周末后 7 天基本覆盖正常滞后；
+// 超过 7 天多为基金代码有误、或该基金已停牌 / 清盘，此时提醒最有价值。
+const OVERDUE_DAYS = 7
 import { useKline } from '../kline.jsx'
 
 // 带历史记忆的输入框：记忆最近 5 个值，点击下拉可快速回填
@@ -44,6 +49,15 @@ const pfmt = (n, market) => (n == null ? '—' : fmt(n, market === 'FUND' ? 4 : 
 export default function Positions() {
   const [positions, setPositions] = useState([])
   const [txns, setTxns] = useState([])
+  // v36.1：待确认交易的「超时提醒」与「批量补价」
+  //   showBatchSettle 批量补价弹窗开关；batchPrices 各行输入 {[txnId]: '3.4025'}；
+  //   batchNotes 各行取净值结果提示 {[txnId]: {ok, msg}}
+  const [showBatchSettle, setShowBatchSettle] = useState(false)
+  const [batchPrices, setBatchPrices] = useState({})
+  const [batchNotes, setBatchNotes] = useState({})
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [batchFetching, setBatchFetching] = useState(false)
+  const txnCardRef = useRef(null)
   // 交易记录按 市场|代码 映射持仓名称（删除持仓会连带删除其全部交易记录，故映射可靠）
   const posNameMap = useMemo(() => {
     const m = {}
@@ -491,7 +505,10 @@ export default function Positions() {
 
   const submit = async () => {
     if (!form.code || !form.quantity) { alert(isFundTxn ? '请填写基金代码与交易份额' : '请填写代码与数量'); return }
-    if (!form.price) { alert(isFundTxn ? '该笔基金交易的净值不可用（尚未公布或无数据），请稍后重新录入，或手动填写价格' : '请填写价格'); return }
+    // v36：场外基金在净值尚未公布时**允许直接提交**（保存为「待确认」，净值公布后自动回填）；
+    // 其他市场仍要求填写价格。
+    if (!form.price && !isFundTxn) { alert('请填写价格'); return }
+    const pending = isFundTxn && !form.price
     const marketMap = { 'A股': 'A', '美股': 'US', '港股': 'HK', '黄金': 'GOLD', '基金': 'FUND', '债券': 'BOND' }
     // 基金：把交易时间与确认份额日期（含 QDII 判定）写入备注，便于追溯
     let note = form.note || ''
@@ -500,18 +517,24 @@ export default function Positions() {
       note = `${note} [${t} 确认${fundConfirmDate}]`.trim()
     }
     try {
-      await api.addTxn({
+      const r = await api.addTxn({
         ...form,
         market: marketMap[form.market] || 'A',
         quantity: parseFloat(form.quantity),
-        price: parseFloat(form.price),
+        price: form.price === '' ? '' : parseFloat(form.price),
         fee: parseFloat(form.fee || 0),
         note,
+        nav_date: isFundTxn ? (navAuto.nav_date || '') : '',
+        price_status: pending ? 'pending' : '',
       })
       setShowForm(false)
       setForm({ market: 'A股', code: '', side: 'BUY', quantity: '', price: '', fee: 0, trans_date: new Date().toISOString().split('T')[0], note: '', fund_time: 'before' })
       setQdiiAuto(false); setQdiiManual(false)
       priceManualRef.current = false; setPriceManual(false)
+      if (pending) {
+        alert('已保存为「待确认」交易。\n' + (navAuto.message || '该交易日的基金净值尚未公布') +
+              '\n净值公布后系统会自动回填价格，并据此更新持仓份额与成本。')
+      }
       fetchData()
     } catch (e) { alert(e.message) }
   }
@@ -543,22 +566,31 @@ export default function Positions() {
   // 保存编辑交易
   const saveEdit = async () => {
     if (!form.code || !form.quantity) { alert(isFundTxn ? '请填写基金代码与交易份额' : '请填写代码与数量'); return }
-    if (!form.price) { alert(isFundTxn ? '该笔基金交易的净值不可用（尚未公布或无数据），请稍后重新录入，或手动填写价格' : '请填写价格'); return }
+    // v36：基金可在净值未公布时保存为「待确认」；其他市场仍要求价格
+    if (!form.price && !isFundTxn) { alert('请填写价格'); return }
+    const pending = isFundTxn && !form.price
     const marketMap = { 'A股': 'A', '美股': 'US', '港股': 'HK', '黄金': 'GOLD', '基金': 'FUND', '债券': 'BOND' }
+    const fields = {
+      market: marketMap[form.market] || 'A',
+      code: form.code,
+      side: form.side,
+      quantity: parseFloat(form.quantity),
+      fee: parseFloat(form.fee || 0),
+      trans_date: form.trans_date,
+      note: form.note,
+      nav_date: isFundTxn ? (navAuto.nav_date || '') : '',
+    }
+    if (pending) {
+      fields.price_status = 'pending'   // 改回待确认（清空价格，等净值回填）
+    } else if (form.price !== '' && parseFloat(form.price) !== editTxn.price) {
+      fields.price = parseFloat(form.price)   // 仅当价格确实改动时才写入（避免把 auto 状态误改成 manual）
+    }
     try {
-      await api.updateTxn(editTxn.id, {
-        market: marketMap[form.market] || 'A',
-        code: form.code,
-        side: form.side,
-        quantity: parseFloat(form.quantity),
-        price: parseFloat(form.price),
-        fee: parseFloat(form.fee || 0),
-        trans_date: form.trans_date,
-        note: form.note,
-      })
+      await api.updateTxn(editTxn.id, fields)
       setEditTxn(null)
       setForm({ market: 'A股', code: '', side: 'BUY', quantity: '', price: '', fee: 0, trans_date: new Date().toISOString().split('T')[0], note: '' })
       priceManualRef.current = false; setPriceManual(false)
+      if (pending) alert('已保存为「待确认」，净值公布后会自动回填价格。')
       fetchData()
     } catch (e) { alert(e.message) }
   }
@@ -567,6 +599,116 @@ export default function Positions() {
     if (!window.confirm('确定删除该交易记录吗？')) return
     await api.delTxn(id)
     fetchData()
+  }
+
+  // v36.1：待确认交易的统计 —— pendingTxns 为全部待确认；overdueTxns 为其中已超 OVERDUE_DAYS 天的
+  const pendingTxns = txns.filter(t => t.pricePending)
+  const overdueTxns = pendingTxns.filter(t => (t.waitDays || 0) > OVERDUE_DAYS)
+  const batchFilled = Object.keys(batchPrices).filter(k => {
+    const v = parseFloat(batchPrices[k]); return !isNaN(v) && v > 0
+  }).length
+
+  // v36.1：打开「批量补价」弹窗（每行留空，避免误把未核对的旧值一次提交）
+  const openBatchSettle = () => {
+    setBatchPrices({})
+    setBatchNotes({})
+    setShowBatchSettle(true)
+  }
+
+  // 滚动到交易记录区（顶部警示条 / 提示条的「去处理」）
+  const scrollToTxns = () => {
+    if (txnCardRef.current) txnCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  // v36.1：取某笔待确认交易「净值对应交易日」的官方单位净值并填入输入框。
+  // 与录入时同源同口径；取不到时**只显示原因、不填任何近似值**（项目数据真实性铁律）。
+  const fetchOneNav = async (t) => {
+    const d = t.nav_date || t.trans_date
+    if (!d) {
+      setBatchNotes(n => ({ ...n, [t.id]: { ok: false, msg: '该交易缺少净值对应交易日，请手动填写' } }))
+      return null
+    }
+    try {
+      const r = await api.fundNavByDate(t.code, d, 'before')
+      if (r.available && r.nav != null) {
+        setBatchPrices(p => ({ ...p, [t.id]: String(r.nav) }))
+        setBatchNotes(n => ({ ...n, [t.id]: { ok: true, msg: `该日官方净值 ${r.nav}（净值日 ${r.nav_date}）` } }))
+        return r.nav
+      }
+      setBatchNotes(n => ({ ...n, [t.id]: { ok: false, msg: r.message || '该日净值暂不可用，请手动填写' } }))
+      return null
+    } catch (e) {
+      setBatchNotes(n => ({ ...n, [t.id]: { ok: false, msg: '净值获取失败：' + e.message } }))
+      return null
+    }
+  }
+
+  // 一键取全部官方净值：**串行**请求（净值缓存按基金代码分键、无法合并，串行避免瞬时并发打爆数据源）
+  const fetchAllNav = async () => {
+    setBatchFetching(true)
+    let got = 0, fail = 0
+    for (const t of txns.filter(x => x.pricePending)) {
+      const v = await fetchOneNav(t)
+      if (v != null) got += 1; else fail += 1
+    }
+    setBatchFetching(false)
+    if (!got && fail) {
+      alert(`未能取到任何一笔的官方净值（共 ${fail} 笔）。\n多为净值尚未公布 —— 请稍后再试，或直接手动填写成交净值。`)
+    }
+  }
+
+  // v36.1：提交批量补价 —— 只提交填了正数的行；逐笔独立校验，后端返回成功/失败明细
+  const submitBatch = async () => {
+    const items = pendingTxns
+      .map(t => ({ id: t.id, price: parseFloat(batchPrices[t.id]) }))
+      .filter(x => !isNaN(x.price) && x.price > 0)
+    if (!items.length) { alert('请至少填写一笔有效的成交净值'); return }
+    setBatchBusy(true)
+    try {
+      const r = await api.settleBatch(items)
+      const ns = (r.succeeded || []).length
+      const nf = (r.failed || []).length
+      alert(`已确认 ${ns} 笔交易的成交净值，持仓份额与成本已更新。` +
+        (nf ? `\n${nf} 笔提交失败（可能已被自动回填或状态已变更），请刷新后查看。` : ''))
+      setShowBatchSettle(false)
+      fetchData()
+    } catch (e) { alert(e.message) } finally { setBatchBusy(false) }
+  }
+
+  // v36：为「待确认」交易手动补价（净值公布后系统也会自动回填，此处供你随时手动确认）
+  const fillPendingPrice = async (t) => {
+    const label = t.side === 'BUY' ? '买入' : '卖出'
+    const v = window.prompt(
+      `为 ${t.code}（${label} ${fmt(t.quantity)} 份，净值对应交易日 ${t.nav_date || '—'}）填写成交净值：`, '')
+    if (v === null) return
+    const p = parseFloat(v)
+    if (isNaN(p) || p <= 0) { alert('请输入有效的净值'); return }
+    try {
+      await api.settleTxn(t.id, p)
+      alert('已确认该笔交易，持仓份额与成本已更新。')
+      fetchData()
+    } catch (e) { alert(e.message) }
+  }
+
+  // v36：立即检查并回填全部待确认交易（等价于手动触发一次后台净值巡检）
+  const settleAllPending = async () => {
+    try {
+      const r = await api.settleAllPending()
+      const n = (r && r.settled ? r.settled.length : 0)
+      const m = (r && r.still_pending ? r.still_pending.length : 0)
+      const f = (r && r.skippedFuture) || 0
+      if (n) {
+        alert(`已自动回填 ${n} 笔交易的净值，持仓份额与成本已更新。` + (m ? `\n仍有 ${m} 笔待净值公布。` : ''))
+      } else if (m) {
+        const first = r.still_pending[0]
+        alert(`仍有 ${m} 笔待确认交易，净值尚未公布：\n· ${first.code}（净值对应交易日 ${first.navDate || '—'}）\n  ${first.message || ''}`)
+      } else if (f) {
+        alert(`有 ${f} 笔交易的净值对应交易日尚未到来，届时会自动回填。`)
+      } else {
+        alert('当前没有待确认的交易。')
+      }
+      fetchData()
+    } catch (e) { alert(e.message) }
   }
 
   return (
@@ -582,6 +724,25 @@ export default function Positions() {
           <button className="btn" onClick={() => setShowForm(true)}>＋ 录入交易</button>
         </div>
       </div>
+
+      {/* v36.1：待确认交易提醒（置顶，避免被忽略）
+          · 有超时（等待 > OVERDUE_DAYS 天）→ 红色警示条，多数意味着代码有误或基金停牌/清盘
+          · 仅普通待确认 → 金色提示条，说明「尚未计入持仓」，避免用户以为漏算 */}
+      {overdueTxns.length > 0 ? (
+        <div className="warn-bar danger">
+          ⚠️ 有 <b>{overdueTxns.length}</b> 笔交易已等待超过 <b>{OVERDUE_DAYS}</b> 天仍未取到该日官方净值
+          （常见原因是基金代码填错、或该基金已停牌 / 清盘），请核对后手动补价：
+          <span className="muted"> {overdueTxns.map(t => t.code).join('、')}</span>
+          <button className="btn btn-sm" style={{ marginLeft: 10 }} onClick={openBatchSettle}>批量补价</button>
+          <button className="btn-ghost btn-sm" style={{ marginLeft: 6 }} onClick={scrollToTxns}>去交易记录</button>
+        </div>
+      ) : pendingTxns.length > 0 ? (
+        <div className="warn-bar">
+          ⏳ 另有 <b>{pendingTxns.length}</b> 笔待确认的基金交易（该交易日净值尚未公布），
+          <b>尚未计入持仓</b>份额与成本；净值公布后会自动回填并更新持仓。
+          <button className="btn btn-sm" style={{ marginLeft: 10 }} onClick={openBatchSettle}>批量补价</button>
+        </div>
+      ) : null}
 
       <div className="pos-grid">
         {pagePositions.map(p => (
@@ -820,8 +981,28 @@ export default function Positions() {
         </div>
       )}
 
-      <div className="card">
-        <div className="card-title">交易记录</div>
+      <div className="card" ref={txnCardRef}>
+        <div className="card-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>交易记录
+            {pendingTxns.length > 0 &&
+              <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--muted)', marginLeft: 8 }}>
+                {pendingTxns.length} 笔待确认净值（净值公布后自动回填，回填后才计入持仓）
+                {overdueTxns.length > 0 &&
+                  <span style={{ color: '#f85149', fontWeight: 600 }}>
+                    {' '}· 其中 {overdueTxns.length} 笔已超 {OVERDUE_DAYS} 天，请核对代码后补价
+                  </span>}
+              </span>}
+          </span>
+          <span style={{ display: 'flex', gap: 8 }}>
+            {pendingTxns.length > 0 &&
+              <button className="btn btn-sm" onClick={openBatchSettle}
+                title="一次为多笔待确认交易填写成交净值">批量补价</button>}
+            <button className="btn-ghost" style={{ fontSize: 12 }} onClick={settleAllPending}
+              title="立即向数据源检查待确认交易的净值是否已公布；平时打开本页面也会自动检查（60 秒节流）">
+              🔄 检查净值更新
+            </button>
+          </span>
+        </div>
         <table>
           <thead><tr><th>日期</th><th>代码</th><th>名称</th><th>市场</th><th>方向</th><th className="num">数量</th><th className="num">价格</th><th className="num">手续费</th><th>操作</th></tr></thead>
           <tbody>
@@ -831,9 +1012,18 @@ export default function Positions() {
                 <td><span className="badge badge-a">{t.market}</span></td>
                 <td><span className={`badge ${t.side === 'BUY' ? 'badge-a' : 'badge-u'}`}>{t.side === 'BUY' ? '买入' : '卖出'}</span></td>
                 <td className="num">{fmt(t.quantity)}</td>
-                <td className="num">{fmt(t.price)}</td>
+                <td className="num">
+                  {t.pricePending
+                    ? ((t.waitDays || 0) > OVERDUE_DAYS
+                      ? <span className="badge badge-red"
+                          title={`已等待 ${t.waitDays} 天（净值对应交易日 ${t.nav_date || '—'}）仍未取到官方净值。常见原因是基金代码填错、或该基金已停牌 / 清盘；请核对后手动补价`}>⚠ 已等待 {t.waitDays} 天</span>
+                      : <span className="badge badge-gold"
+                          title={`该交易日的基金净值尚未公布（净值对应交易日 ${t.nav_date || '—'}，已等待 ${t.waitDays == null ? '—' : t.waitDays + ' 天'}）；净值公布后系统会自动回填价格，回填完成后才计入持仓份额与成本`}>⏳ 待确认{t.waitDays ? `（${t.waitDays} 天）` : ''}</span>)
+                    : fmt(t.price)}
+                </td>
                 <td className="num">{fmt(t.fee)}</td>
                 <td>
+                  {t.pricePending && <button className="btn btn-sm" style={{ marginRight: 6 }} onClick={() => fillPendingPrice(t)}>补价</button>}
                   <button className="btn btn-sm" style={{ marginRight: 6 }} onClick={() => openEdit(t)}>编辑</button>
                   <button className="btn-danger" onClick={() => remove(t.id)}>删除</button>
                 </td>
@@ -843,6 +1033,71 @@ export default function Positions() {
         </table>
         {txns.length === 0 && <div className="empty">暂无交易记录</div>}
       </div>
+
+      {/* v36.1：批量补价弹窗 —— 一次为多笔待确认交易填写成交净值
+          · 「取官方净值」按该笔的「净值对应交易日」取真实官方单位净值；
+          · 取不到只显示原因，绝不用其它日期的净值顶替（数据真实性铁律）；
+          · 只提交填了正数的行，留空的行保持待确认。 */}
+      {showBatchSettle && pendingTxns.length > 0 && (
+        <div className="modal show" onClick={e => { if (e.target === e.currentTarget) setShowBatchSettle(false) }}>
+          <div className="modal-card" style={{ width: 'min(900px, 94vw)' }}>
+            <div className="modal-head">
+              <h3>批量补价 · {pendingTxns.length} 笔待确认交易</h3>
+              <button className="modal-close" onClick={() => setShowBatchSettle(false)}>×</button>
+            </div>
+            <div className="nav-hint" style={{ marginBottom: 12 }}>
+              填写<b>成交单位净值</b>后一次提交，提交后这些交易才计入持仓份额与成本。
+              可点「取官方净值」按该笔的净值对应交易日取<b>真实官方单位净值</b>并自动填入；
+              取不到时会说明具体原因（尚未公布 / 无该日数据 / 数据源失败），<b>不会用其它日期的净值顶替</b>。
+              留空的行不会被提交，仍保持待确认。
+            </div>
+            <table>
+              <thead><tr>
+                <th>代码 / 名称</th><th>方向</th><th className="num">份额</th>
+                <th>净值对应日</th><th className="num">已等待</th>
+                <th style={{ width: 170 }}>成交净值</th><th>操作</th>
+              </tr></thead>
+              <tbody>
+                {pendingTxns.map(t => (
+                  <tr key={t.id}>
+                    <td>{t.code}<div className="muted" style={{ fontSize: 11 }}>{txnName(t)}</div></td>
+                    <td><span className={`badge ${t.side === 'BUY' ? 'badge-a' : 'badge-u'}`}>{t.side === 'BUY' ? '买入' : '卖出'}</span></td>
+                    <td className="num">{fmt(t.quantity)}</td>
+                    <td>{t.nav_date || '—'}</td>
+                    <td className="num">
+                      {(t.waitDays || 0) > OVERDUE_DAYS
+                        ? <span style={{ color: '#f85149', fontWeight: 600 }}>{t.waitDays} 天</span>
+                        : (t.waitDays == null ? '—' : `${t.waitDays} 天`)}
+                    </td>
+                    <td>
+                      <input className="form-input" type="number" step="0.0001" min="0"
+                        placeholder="留空则保持待确认"
+                        value={batchPrices[t.id] ?? ''}
+                        onChange={e => setBatchPrices(p => ({ ...p, [t.id]: e.target.value }))} />
+                      {batchNotes[t.id] && (
+                        <div className={`nav-hint ${batchNotes[t.id].ok ? 'ok' : 'warn'}`}>{batchNotes[t.id].msg}</div>
+                      )}
+                    </td>
+                    <td>
+                      <button className="btn-ghost btn-sm" onClick={() => fetchOneNav(t)}
+                        title="按该笔的「净值对应交易日」取官方单位净值">取官方净值</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="form-actions" style={{ marginTop: 14 }}>
+              <button className="btn-ghost" onClick={() => setShowBatchSettle(false)}>取消</button>
+              <button className="btn-ghost" onClick={fetchAllNav} disabled={batchFetching}>
+                {batchFetching ? '取净值中…' : '一键取全部官方净值'}
+              </button>
+              <button className="btn" onClick={submitBatch} disabled={batchBusy || batchFilled === 0}>
+                {batchBusy ? '提交中…' : `提交（已填 ${batchFilled} 笔）`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 实物黄金（置于页面最下方） */}
       <div className="card" style={{ marginBottom: 16 }}>

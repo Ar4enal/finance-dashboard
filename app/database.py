@@ -47,6 +47,20 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
+    # v36：待确认交易的字段迁移（兼容旧库，幂等）
+    #   nav_date     = 该笔交易的「净值对应交易日」（依 15:00 规则算出；非基金或无净值口径时为空）
+    #   price_status = settled 已确认（含手动填价）/ pending 待回填 / auto 由净值自动回填
+    # 待确认交易在库内 price 写 0 以兼容既有 NOT NULL 约束（避免重建表带来的数据风险），
+    # 但 get_transactions() 对外会把 pending 行的 price 统一暴露为 None，
+    # 使「价格未知」在下游是显式的 None 而非可被误用的 0 —— 详见 get_transactions 说明。
+    for _ddl in (
+        "ALTER TABLE transactions ADD COLUMN nav_date TEXT DEFAULT ''",
+        "ALTER TABLE transactions ADD COLUMN price_status TEXT DEFAULT 'settled'",
+    ):
+        try:
+            cur.execute(_ddl)
+        except Exception:
+            pass
     cur.execute("""
         CREATE TABLE IF NOT EXISTS snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,23 +271,133 @@ def delete_asset_transactions(market, code):
 
 
 # ---------------- 交易记录 ----------------
-def add_transaction(market, code, side, quantity, price, fee, trans_date, note=""):
+def add_transaction(market, code, side, quantity, price, fee, trans_date, note="",
+                    nav_date="", price_status="settled"):
+    """新增交易记录。
+
+    v36：`price_status='pending'` 表示「待确认」—— 录入时该基金净值尚未公布、或确认份额日未到。
+    此时 `price` 允许传 None，落库写 0 以兼容既有 NOT NULL 约束（对外由 get_transactions 还原为 None）。
+    `nav_date` 记录该笔交易的**净值对应交易日**（依 15:00 规则算出），供后续自动回填使用。
+    """
     conn = _connect()
     try:
         cur = conn.execute(
-            "INSERT INTO transactions(market,code,side,quantity,price,fee,trans_date,note)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (market, code, side, quantity, price, fee, trans_date, note))
+            "INSERT INTO transactions(market,code,side,quantity,price,fee,trans_date,note,"
+            "nav_date,price_status) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (market, code, side, quantity,
+             0 if price is None else price,
+             fee, trans_date, note, nav_date or "", price_status or "settled"))
         conn.commit()
         return cur.lastrowid
     finally:
         conn.close()
 
 
+def _days_since(date_str):
+    """返回 date_str 到今天（本地日期）的**自然日数**；无法解析时返回 None。
+
+    v36.1：用于「待确认交易已等待多少天」——等待时长以**净值对应交易日**起算
+    （缺 nav_date 的老数据退回 trans_date），供前端做超时提醒。
+    """
+    s = str(date_str or "").strip()[:10]
+    if not s:
+        return None
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (datetime.now().date() - d).days
+
+
+def get_pending_transactions():
+    """返回全部「待确认」交易（净值未到账），按净值对应交易日 / id 升序。
+    供后台回填线程与手动补价使用。
+
+    v36.1：每条附 `waitDays`（已等待自然日数，自净值对应交易日起算），供超时提醒。
+    """
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM transactions WHERE price_status='pending'"
+            " ORDER BY nav_date, id").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if not d.get("nav_date"):
+                d["nav_date"] = ""
+            d["waitDays"] = _days_since(d["nav_date"] or d.get("trans_date"))
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def settle_transaction(tid, price, source="auto", nav_date=None):
+    """把一笔待确认交易结算为已确认：写入成交价格并更新价格状态。
+
+    source: 'auto'（由官方净值自动回填）/ 'manual'（用户手动补价）
+    nav_date: 可选，覆盖净值对应交易日（自动回填时写入实际取到的交易日）
+    返回是否成功更新（交易不存在或价格非法则 False）。
+    """
+    if price is None or float(price) <= 0:
+        return False
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        if nav_date:
+            cur.execute(
+                "UPDATE transactions SET price=?, price_status=?, nav_date=?"
+                " WHERE id=? AND price_status='pending'",
+                (float(price), source, nav_date, tid))
+        else:
+            cur.execute(
+                "UPDATE transactions SET price=?, price_status=?"
+                " WHERE id=? AND price_status='pending'",
+                (float(price), source, tid))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def settle_transactions_batch(items, source="manual"):
+    """批量把「待确认」交易结算为已确认（v36.1，供前端「批量补价」使用）。
+
+    items: [{"id": <int>, "price": <float>}, ...]
+    逐笔独立校验与提交，**单笔失败不影响其余**；返回：
+      {"succeeded": [{"id","price"}], "failed": [{"id","price","reason"}]}
+    reason: invalid_id / invalid_price / not_pending（交易不存在或已不是待确认状态）
+    """
+    succeeded, failed = [], []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            failed.append({"id": None, "reason": "invalid_id"})
+            continue
+        try:
+            tid = int(it.get("id"))
+        except (TypeError, ValueError):
+            failed.append({"id": it.get("id"), "reason": "invalid_id"})
+            continue
+        try:
+            price = float(it.get("price"))
+        except (TypeError, ValueError):
+            failed.append({"id": tid, "reason": "invalid_price"})
+            continue
+        if price <= 0:
+            failed.append({"id": tid, "price": price, "reason": "invalid_price"})
+            continue
+        if settle_transaction(tid, price, source=source):
+            succeeded.append({"id": tid, "price": price})
+        else:
+            failed.append({"id": tid, "price": price, "reason": "not_pending"})
+    return {"succeeded": succeeded, "failed": failed}
+
+
 def update_transaction(tid, **fields):
     conn = _connect()
     try:
-        allowed = {"market", "code", "side", "quantity", "price", "fee", "trans_date", "note"}
+        allowed = {"market", "code", "side", "quantity", "price", "fee", "trans_date", "note",
+                   "nav_date", "price_status"}
         sets, vals = [], []
         for k, v in fields.items():
             if k in allowed:
@@ -297,6 +421,16 @@ def delete_transaction(tid):
 
 
 def get_transactions(market=None, code=None):
+    """返回交易记录（按 trans_date / id 倒序，供列表展示）。
+
+    v36：**待确认交易的价格在此统一归一**。待确认交易（`price_status='pending'`，即录入时
+    该基金净值尚未公布或确认日未到）在库内 price 写 0 以兼容既有 NOT NULL 约束，
+    本函数把它们的 `price` 对外暴露为 **None**，并附带 `pricePending=True`。
+    这样下游（持仓聚合 / 已实现收益 / 导出）看到的是显式的「价格未知」，
+    而不是一个会被误用的 0（0 会让成本算成 0、收益虚高）。
+
+    v36.1：待确认行附 `waitDays`（已等待自然日数，自净值对应交易日起算），供前端超时提醒。
+    """
     conn = _connect()
     try:
         sql = "SELECT * FROM transactions"
@@ -309,7 +443,21 @@ def get_transactions(market=None, code=None):
             sql += " WHERE " + " AND ".join(cond)
         sql += " ORDER BY trans_date DESC, id DESC"
         rows = conn.execute(sql, vals).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            if not d.get("price_status"):
+                d["price_status"] = "settled"
+            if not d.get("nav_date"):
+                d["nav_date"] = ""
+            pending = (d["price_status"] == "pending")
+            if pending:
+                d["price"] = None
+                # v36.1：已等待天数（自然日），供「超过 N 天」的超时提醒
+                d["waitDays"] = _days_since(d["nav_date"] or d.get("trans_date"))
+            d["pricePending"] = pending
+            out.append(d)
+        return out
     finally:
         conn.close()
 
@@ -321,6 +469,11 @@ def compute_positions(market=None, code=None):
     买入：qty 与 cost（含手续费）累加。
     卖出：按卖出前平均成本扣减 cost，再减 qty（避免成本虚高）。
     返回 [{market, code, quantity, avg_cost, cost}]
+
+    ⚠️ **这是「纯交易流水重放」，不含手工持仓（position_override）**。
+    凡用于「展示 / 汇总持仓」的场景，请改用 `compute_positions_including_soldout()`
+    （v35 需求2 起它已把手工持仓作为「建仓基准」注入重放，口径完整）；
+    用本函数会漏掉手工新增的持仓，也会把「只有卖出、没有买入流水」的持仓误判为已清空。
     """
     txns = get_transactions(market, code)
     # 必须按 (成交日期, id) 升序重放，保证买入先于卖出；
@@ -329,6 +482,9 @@ def compute_positions(market=None, code=None):
     # 持仓字典: key=(market,code) -> {qty, cost}
     pos = {}
     for t in txns:
+        # v36：待确认交易（价格未知）跳过，净值到账回填后才生效
+        if t.get("price_status") == "pending" or t.get("price") is None:
+            continue
         key = (t["market"], t["code"])
         p = pos.setdefault(key, {"qty": 0.0, "cost": 0.0})
         qty = t["quantity"]
@@ -362,11 +518,20 @@ def compute_positions_including_soldout(market=None, code=None):
     与 compute_positions 相同逻辑，但保留「已卖光」(qty<=1e-9) 的持仓 key，
     用于展示「已清仓」行：数量/成本/均价置空(None)，并标记 sold_out=True，
     其累计收益由 compute_realized_pnl 提供（全部已实现盈亏），仍计入组合整体。
+
+    v35 需求2：重放序列中**注入手工持仓作为「建仓基准」**（见 `_po_baseline_txns`）。
+    此前只重放 `transactions`，手工新增的持仓（无买入流水）数量恒为 0，
+    导致「只要录入一笔卖出就被判定已卖光」——与卖出量是否小于持仓量无关。
     """
     txns = get_transactions(market, code)
+    txns = txns + _po_baseline_txns(market, code)
     txns = sorted(txns, key=lambda x: (x["trans_date"], x["id"]))
     pos = {}
     for t in txns:
+        # v36：待确认交易（价格未知）不参与聚合 —— 净值到账回填后才生效。
+        # 若参与，价格会被当成 0 → 成本算成 0、收益虚高。
+        if t.get("price_status") == "pending" or t.get("price") is None:
+            continue
         key = (t["market"], t["code"])
         p = pos.setdefault(key, {"qty": 0.0, "cost": 0.0})
         qty = t["quantity"]
@@ -756,13 +921,52 @@ def clear_asset_profit_override(market, code):
 
 # ---------------- 持仓覆盖（手动编辑数量/成本） ----------------
 def get_position_overrides():
-    """返回 {(market, code): {quantity, cost}}"""
+    """返回 {(market, code): {quantity, cost, updated_at}}
+
+    updated_at（写入时间）用于把手工持仓当作**建仓基准**参与交易重放时确定其时间位置（v35 需求2）：
+    基准日期早于交易 → 交易叠加在基准之上；基准日期晚于交易（用户后编辑过持仓）→ 基准覆盖该日之前的交易效果。
+    """
     conn = _connect()
     try:
-        rows = conn.execute("SELECT market,code,quantity,cost FROM position_override").fetchall()
-        return {(r["market"], r["code"]): {"quantity": r["quantity"], "cost": r["cost"]} for r in rows}
+        rows = conn.execute(
+            "SELECT market,code,quantity,cost,updated_at FROM position_override").fetchall()
+        return {(r["market"], r["code"]): {"quantity": r["quantity"], "cost": r["cost"],
+                                           "updated_at": r["updated_at"]} for r in rows}
     finally:
         conn.close()
+
+
+def _po_baseline_txns(market=None, code=None):
+    """把手工持仓（position_override）转成虚拟的「建仓买入」流水，用于参与交易重放（v35 需求2）。
+
+    背景：手工新增的初始持仓只在 `position_override` 表里，`transactions` 中没有对应买入。
+    此前重放时该产品数量恒为 0，导致「只要录一笔卖出就被判定已卖光」——与持仓量无关。
+
+    做法：生成一笔 `side=BUY` 的虚拟流水，价格 = cost / quantity（保证重放后成本一致）、
+    日期取 override 的 `updated_at` 日期、`id=-1`（同日排在最前）。
+    这样重放的先后顺序天然给出正确语义：
+      - 先录持仓（基准早）、后录卖出 → 先建仓再卖出，数量正确扣减、可算出已实现收益；
+      - 后编辑持仓（基准晚）→ 基准覆盖该日之前的交易效果，界面显示用户填写的持仓值；
+      - 卖出量 ≥ 持仓量 → 数量归零、正常标记「已清仓」（此时才是真的清仓）。
+    """
+    out = []
+    for (mk, cd), ov in get_position_overrides().items():
+        if market is not None and mk != market:
+            continue
+        if code is not None and cd != code:
+            continue
+        q = ov.get("quantity")
+        if q is None or float(q) <= 1e-9:
+            continue
+        q = float(q)
+        cost = float(ov.get("cost") or 0)
+        d = str(ov.get("updated_at") or "")[:10]
+        if not d:
+            d = "1970-01-01"
+        out.append({"market": mk, "code": cd, "side": "BUY", "quantity": q,
+                    "price": (cost / q) if q else 0.0, "fee": 0.0,
+                    "trans_date": d, "id": -1, "price_status": "settled"})
+    return out
 
 
 def save_position_override(market, code, quantity, cost):
@@ -984,8 +1188,12 @@ def compute_realized_pnl():
     根据交易记录计算每个资产的历史已实现收益（卖出时的盈利累加）。
     移动加权平均成本：卖出时 (卖出价 - 卖出前平均成本)*卖出量 - 卖出手续费。
     返回 { (market, code): realized_pnl }
+
+    v35 需求2：同样注入手工持仓作为「建仓基准」——否则没有买入流水的手工持仓，
+    卖出时平均成本为 0，会被算成「(卖价−0)×数量」的全额收益。
     """
     txns = get_transactions()
+    txns = txns + _po_baseline_txns()
     # 按资产分组并按时间/id 顺序处理
     assets = {}
     order = {}
@@ -1002,6 +1210,9 @@ def compute_realized_pnl():
         cost = 0.0  # 总成本（含手续费）
         rpnl = 0.0
         for t in ts:
+            # v36：待确认交易（价格未知）跳过 —— 回填后再计入已实现收益
+            if t.get("price_status") == "pending" or t.get("price") is None:
+                continue
             q = t["quantity"]
             if t["side"] == "BUY":
                 qty += q
@@ -1120,13 +1331,22 @@ def import_all_data(payload):
             stat["watchlist"] += 1
 
         # 3) 交易记录
+        # v36：待确认交易在导出时 price 为 None（价格未知），此处还原为库内占位 0 + pending 状态；
+        # 旧备份无 price_status 字段 → 一律视为 settled，price 取原值（向后兼容）。
         for t in payload.get("transactions", []):
+            _st = t.get("price_status") or ("pending" if t.get("pricePending") else "settled")
+            _px = t.get("price")
+            if _px is None:
+                _px = 0
+                if _st == "settled":
+                    _st = "pending"
             cur.execute(
-                "INSERT INTO transactions(market,code,side,quantity,price,fee,trans_date,note,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO transactions(market,code,side,quantity,price,fee,trans_date,note,"
+                "nav_date,price_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (t.get("market", ""), t.get("code", ""), t.get("side", "BUY"),
-                 t.get("quantity", 0), t.get("price", 0), t.get("fee", 0),
+                 t.get("quantity", 0), _px, t.get("fee", 0),
                  t.get("trans_date", ""), t.get("note", ""),
+                 t.get("nav_date", "") or "", _st,
                  t.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             stat["transactions"] += 1
 

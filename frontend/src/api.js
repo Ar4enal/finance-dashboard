@@ -44,7 +44,23 @@ export const api = {
   unpinPosition: (market, code) => request(`/api/position/pin/${market}/${encodeURIComponent(code)}`, { method: 'DELETE' }),
   // 交易
   transactions: (market, code) => request(`/api/transactions${market ? '?market=' + market : ''}`),
-  addTxn: (t) => request(`/api/transactions?market=${t.market}&code=${t.code}&side=${t.side}&quantity=${t.quantity}&price=${t.price}&fee=${t.fee||0}&trans_date=${t.trans_date}&note=${t.note||''}`, { method: 'POST' }),
+  addTxn: (t) => {
+    // v36：场外基金在「净值对应交易日」的官方净值尚未公布时，允许不带 price 以「待确认」提交，
+    // 后端先落库、等净值公布后自动回填价格（回填完成后才计入持仓与已实现收益）。
+    const p = [`market=${t.market}`, `code=${encodeURIComponent(t.code)}`, `side=${t.side}`,
+               `quantity=${t.quantity}`, `fee=${t.fee || 0}`,
+               `trans_date=${encodeURIComponent(t.trans_date)}`,
+               `note=${encodeURIComponent(t.note || '')}`]
+    if (t.price !== '' && t.price !== null && t.price !== undefined) p.push(`price=${t.price}`)
+    if (t.nav_date) p.push(`nav_date=${encodeURIComponent(t.nav_date)}`)
+    if (t.price_status) p.push(`price_status=${t.price_status}`)
+    return request(`/api/transactions?${p.join('&')}`, { method: 'POST' })
+  },
+  // v36：待确认交易的净值回填（单笔手动补价 / 立即巡查全部）
+  settleTxn: (id, price) => request(`/api/transactions/${id}/settle?price=${price}`, { method: 'POST' }),
+  settleAllPending: () => request('/api/transactions/settle-pending', { method: 'POST' }),
+  // v36.1：批量补价 —— items = [{id, price}, ...]，一次为多笔待确认交易填写成交净值
+  settleBatch: (items) => request('/api/transactions/settle-batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(items) }),
   updateTxn: (id, fields) => {
     const q = Object.entries(fields).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')
     return request(`/api/transactions/${id}?${q}`, { method: 'PUT' })

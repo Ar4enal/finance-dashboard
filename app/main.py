@@ -21,6 +21,7 @@ from . import indicators as ind
 from . import database as db
 from . import intraday_track as itrack
 from . import auto_export as ax
+from . import pending_settle as ps
 
 app = FastAPI(title="金融工作台", version="1.0.0")
 
@@ -870,27 +871,85 @@ def position_unpin(market: str, code: str):
 # =========================================================
 @app.get("/api/transactions")
 def transactions(market: Optional[str] = None, code: Optional[str] = None):
+    # v36：打开交易列表时也顺带补查一次待确认交易（内部 60s 节流、无待确认交易时不发请求），
+    # 使列表与持仓页看到的是同一份最新状态。
+    try:
+        ps.settle_pending()
+    except Exception:
+        pass
     rows = db.get_transactions(market=market, code=code)
     return ok(rows)
 
 
 @app.post("/api/transactions")
 def add_txn(market: str, code: str, side: str, quantity: float,
-            price: float, fee: float = 0, trans_date: str = "",
-            note: str = ""):
+            price: Optional[float] = None, fee: float = 0, trans_date: str = "",
+            note: str = "", nav_date: str = "", price_status: str = ""):
+    """录入交易。
+
+    v36：**场外基金**在「净值对应交易日」的官方净值尚未公布（或确认份额日未到）时，
+    允许以「待确认」状态先落库（`price` 可缺省），由后台线程在净值公布后自动回填价格，
+    **回填完成后该笔交易才计入持仓与已实现收益**；其他市场仍要求填写价格。
+    `nav_date` 为该笔交易的净值对应交易日（依 15:00 规则算出），供回填时按日取净值。
+    """
     mkt = ds.normalize_market(market)
     side_u = side.upper()
     if side_u not in ("BUY", "SELL"):
         return fail("方向须为 BUY 或 SELL")
-    if quantity <= 0 or price <= 0:
-        return fail("数量与价格须为正数")
+    if quantity <= 0:
+        return fail("数量须为正数")
     if not trans_date:
         trans_date = db.today_str()
-    tid = db.add_transaction(mkt, code, side_u, quantity, price, fee, trans_date, note)
+    has_price = price is not None and float(price) > 0
+    if has_price:
+        st = price_status if price_status in ("settled", "manual") else "settled"
+    else:
+        if mkt != "FUND":
+            return fail("数量与价格须为正数")
+        # 基金且净值不可用 → 待确认落库（价格留空，等净值公布后自动回填）
+        st = "pending"
+        price = None
+    tid = db.add_transaction(mkt, code, side_u, quantity, price, fee, trans_date, note,
+                             nav_date=nav_date, price_status=st)
     # 录入持仓交易后自动同步到自选标的（实物黄金除外——黄金有独立模块）
     if mkt != "GOLD":
         db.add_watchlist(mkt, code, "")
-    return ok({"id": tid})
+    return ok({"id": tid, "priceStatus": st, "pending": st == "pending"})
+
+
+@app.post("/api/transactions/settle-pending")
+def settle_pending_txns():
+    """立即检查并回填全部「待确认」交易（手动触发，忽略节流）。
+
+    返回 {"checked", "settled":[{id,code,nav,navDate,...}], "still_pending":[{id,code,reason,message}]}
+    前端据此提示「已自动回填 N 笔」或「仍有 M 笔待净值公布」。
+    """
+    return ok(ps.settle_pending(force=True))
+
+
+@app.post("/api/transactions/settle-batch")
+def settle_txns_batch(items: list = Body(..., description="待补价交易数组 [{id, price}, ...]")):
+    """v36.1：批量补价 —— 一次为多笔「待确认」交易填写成交净值（用户手动确认）。
+
+    逐笔独立校验与提交，**单笔失败不影响其余**；
+    返回 {"succeeded":[{id,price}], "failed":[{id,price,reason}]}。
+    reason: invalid_id / invalid_price / not_pending。
+    """
+    if not isinstance(items, list) or not items:
+        return fail("请提供待补价的交易列表 [{id, price}]")
+    r = db.settle_transactions_batch(items, source="manual")
+    return ok(r)
+
+
+@app.post("/api/transactions/{tid}/settle")
+def settle_txn_manual(tid: int, price: float):
+    """手动为某笔待确认交易补价（用户已知成交价时使用），置 price_status='manual'。"""
+    if price is None or float(price) <= 0:
+        return fail("价格须为正数")
+    okk = db.settle_transaction(tid, float(price), source="manual")
+    if not okk:
+        return fail("该交易不存在或已确认，无需补价")
+    return ok({"id": tid, "price": float(price), "priceStatus": "manual"})
 
 
 @app.delete("/api/transactions/{tid}")
@@ -903,8 +962,13 @@ def del_txn(tid: int):
 def update_txn(tid: int, market: Optional[str] = None, code: Optional[str] = None,
                side: Optional[str] = None, quantity: Optional[float] = None,
                price: Optional[float] = None, fee: Optional[float] = None,
-               trans_date: Optional[str] = None, note: Optional[str] = None):
-    """编辑交易记录（仅更新传入的字段）。"""
+               trans_date: Optional[str] = None, note: Optional[str] = None,
+               nav_date: Optional[str] = None, price_status: Optional[str] = None):
+    """编辑交易记录（仅更新传入的字段）。
+
+    v36：`price_status='pending'` 可把交易改回「待确认」（清空价格、等待净值回填）；
+    传入具体 `price` 时视为用户手动确认，价格状态置 `manual`。
+    """
     fields = {}
     if market is not None:
         fields["market"] = ds.normalize_market(market)
@@ -923,12 +987,21 @@ def update_txn(tid: int, market: Optional[str] = None, code: Optional[str] = Non
         if price <= 0:
             return fail("价格须为正数")
         fields["price"] = price
+        fields["price_status"] = "manual"       # 用户手动确认价格
+    if price_status is not None:
+        if price_status not in ("pending", "settled", "manual", "auto"):
+            return fail("价格状态取值非法")
+        fields["price_status"] = price_status
+        if price_status == "pending":
+            fields["price"] = 0                 # 库内占位，对外由 get_transactions 还原为 None
     if fee is not None:
         fields["fee"] = fee
     if trans_date is not None:
         fields["trans_date"] = trans_date
     if note is not None:
         fields["note"] = note
+    if nav_date is not None:
+        fields["nav_date"] = nav_date
     if not fields:
         return fail("没有需要更新的字段")
     db.update_transaction(tid, **fields)
@@ -979,6 +1052,14 @@ async def _clear_positions_cache_on_write(request, call_next):
 
 @app.get("/api/positions")
 def positions():
+    # v36：打开/刷新持仓页时顺带补查一次待确认交易的净值。
+    # settle_pending() 内部有 60s 节流，且**无待确认交易时立即返回、不发任何网络请求**；
+    # 放在取数之前，保证本次返回的就是回填后的最新持仓。
+    try:
+        ps.settle_pending()
+        _positions_cache_clear()   # 回填可能改变了持仓，清掉 3s 缓存保证本次取到最新
+    except Exception:
+        pass
     return ok(_positions_data_cached())
 
 
@@ -1133,7 +1214,7 @@ def _positions_data():
     pos = db.compute_positions_including_soldout()
     realized = db.compute_realized_pnl()
     overrides = db.get_asset_profit_overrides()
-    po = db.get_position_overrides()  # {(market,code): {quantity, cost}}
+    po = db.get_position_overrides()  # {(market,code): {quantity, cost, updated_at}}
     if po:
         pos_by_key = {(_n(p["market"]), p["code"]): p for p in pos}
         for key, ov in po.items():
@@ -1145,20 +1226,22 @@ def _positions_data():
                 # 数量为0 → 视为删除该持仓
                 pos_by_key.pop((mk, cd), None)
                 continue
-            if ov.get("quantity") is not None and ov.get("cost") is not None:
+            # v35 需求2：数量>0 的手工持仓**已作为「建仓基准」参与交易重放**
+            # （见 db._po_baseline_txns），此处不再覆盖 quantity/cost。
+            # 原实现在此直接赋值，会丢掉之后买入/卖出的影响；且在「只有卖出、没有买入流水」时
+            # 把 sold_out=True 留在行上（数量虽被赋值回来，标记未清除）→ 持仓明明还在却显示「已清仓」。
+            row = pos_by_key.get((mk, cd))
+            if row is not None:
+                row["overridden"] = True
+            else:
+                # 防御分支：基准已注入，正常情况下该行必然存在
                 qty = ov["quantity"]
-                cost = ov["cost"]
-                if (mk, cd) in pos_by_key:
-                    pos_by_key[(mk, cd)]["quantity"] = qty
-                    pos_by_key[(mk, cd)]["cost"] = cost
-                    pos_by_key[(mk, cd)]["avg_cost"] = round(cost / qty, 4) if qty > 0 else 0
-                    pos_by_key[(mk, cd)]["overridden"] = True
-                else:
-                    pos_by_key[(mk, cd)] = {
-                        "market": mk, "code": cd, "quantity": qty,
-                        "avg_cost": round(cost / qty, 4) if qty > 0 else 0,
-                        "cost": cost, "overridden": True,
-                    }
+                cost = ov.get("cost") or 0
+                pos_by_key[(mk, cd)] = {
+                    "market": mk, "code": cd, "quantity": qty,
+                    "avg_cost": round(cost / qty, 4) if qty > 0 else 0,
+                    "cost": cost, "overridden": True,
+                }
         pos = list(pos_by_key.values())
     # ---- v33 性能优化：行情一次批量请求 + 基金官方净值并发拉取 ----
     # 背景：原实现对每个持仓逐只 sina_quotes + 基金逐个 fund_kline（N 只 = 2N 次串行 HTTP，
@@ -1553,16 +1636,16 @@ def _auto_pnl_for(mkt, code):
         if g["available"] and holding["grams"] > 0:
             return g["price"] * holding["grams"] - holding["cost_price"] * holding["grams"]
         return 0.0
-    # 交易聚合持仓 + 持仓覆盖（新增持仓）统一取「市值 - 成本」
+    # 交易聚合持仓 + 手工持仓「建仓基准」，统一取「市值 − 成本」
+    # v35 需求2 起手工持仓已作为建仓基准参与重放（见 db._po_baseline_txns），故不再单独覆盖，
+    # 否则会用 override 的静态值抹掉之后买入/卖出的影响（累计收益基准也会跟着算错）。
     qty = 0.0
     cost = 0.0
-    for p in db.compute_positions(market=mkt, code=code):
-        qty += p["quantity"]
-        cost += p["cost"]
-    ov = db.get_position_overrides().get((mkt, code))
-    if ov and ov.get("quantity") is not None:
-        qty = ov["quantity"]
-        cost = ov.get("cost") or cost
+    for p in db.compute_positions_including_soldout(market=mkt, code=code):
+        if p.get("sold_out"):
+            continue
+        qty += p["quantity"] or 0
+        cost += p["cost"] or 0
     if qty <= 0:
         return 0.0
     sym = ds.to_sina_symbol(mkt, code)
@@ -2253,6 +2336,10 @@ def startup():
         pass
     try:
         ax.start()  # v34 需求5：启动「持仓数据自动导出」调度线程（每 30s 轮询，含启动补导）
+    except Exception:
+        pass
+    try:
+        ps.start()  # v36：启动「待确认交易净值回填」线程（每 30 分钟巡检，无待确认交易时不做任何请求）
     except Exception:
         pass
 
