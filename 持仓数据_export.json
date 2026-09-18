@@ -1,181 +1,197 @@
 {
   "app": "finance-workbench",
   "version": 1,
-  "exported_at": "2026-09-14 14:47:52",
+  "exported_at": "2026-09-18 10:04:13",
   "watchlist": [
     {
-      "id": 1,
+      "id": 25,
       "market": "FUND",
       "code": "008254",
       "name": "华宝致远混合C",
       "created_at": "2026-08-26 17:01:22"
     },
     {
-      "id": 2,
+      "id": 26,
       "market": "FUND",
       "code": "002891",
       "name": "华夏移动互联混合(QDII)(人民币)",
       "created_at": "2026-08-26 17:02:18"
     },
     {
-      "id": 3,
+      "id": 27,
       "market": "FUND",
       "code": "017654",
       "name": "创金合信全球芯片产业股票发起(QDII)C",
       "created_at": "2026-08-26 17:03:28"
     },
     {
-      "id": 4,
+      "id": 28,
       "market": "FUND",
       "code": "019088",
       "name": "工银中证稀有金属主题ETF发起式联接C",
       "created_at": "2026-08-27 09:06:32"
     },
     {
-      "id": 5,
+      "id": 29,
       "market": "FUND",
       "code": "011452",
       "name": "华泰柏瑞质量成长混合C",
       "created_at": "2026-08-27 09:06:32"
     },
     {
-      "id": 6,
+      "id": 30,
       "market": "FUND",
       "code": "539001",
       "name": "建信纳斯达克100指数(QDII)A人民币",
       "created_at": "2026-08-27 09:07:48"
     },
     {
-      "id": 7,
+      "id": 31,
       "market": "FUND",
       "code": "018147",
       "name": "建信新兴市场混合(QDII)C",
       "created_at": "2026-08-27 09:07:48"
     },
     {
-      "id": 8,
+      "id": 32,
       "market": "FUND",
       "code": "020973",
       "name": "易方达国证机器人产业ETF联接发起式C",
       "created_at": "2026-08-27 09:09:47"
     },
     {
-      "id": 9,
+      "id": 33,
       "market": "FUND",
       "code": "016665",
       "name": "天弘全球高端制造混合(QDII)C",
       "created_at": "2026-08-27 09:09:47"
     },
     {
-      "id": 10,
+      "id": 34,
       "market": "FUND",
       "code": "021277",
       "name": "广发全球精选股票(QDII)人民币C",
       "created_at": "2026-08-27 09:09:47"
     },
     {
-      "id": 11,
+      "id": 35,
       "market": "FUND",
       "code": "012752",
       "name": "建信纳斯达克100指数(QDII)C人民币",
       "created_at": "2026-08-27 09:10:28"
     },
     {
-      "id": 12,
+      "id": 36,
       "market": "FUND",
       "code": "020840",
       "name": "南方中证半导体产业指数发起C",
       "created_at": "2026-08-27 09:11:22"
     },
     {
-      "id": 13,
+      "id": 37,
       "market": "FUND",
       "code": "017470",
       "name": "嘉实上证科创板芯片ETF发起联接C",
       "created_at": "2026-08-27 09:12:06"
     },
     {
-      "id": 14,
+      "id": 38,
       "market": "FUND",
       "code": "000218",
       "name": "国泰黄金ETF联接A",
       "created_at": "2026-08-27 09:18:27"
     },
     {
-      "id": 15,
+      "id": 39,
       "market": "FUND",
       "code": "016702",
       "name": "银华海外数字经济量化选股混合发起式(QDII)C",
       "created_at": "2026-08-27 09:21:34"
     },
     {
-      "id": 16,
+      "id": 40,
       "market": "FUND",
       "code": "016701",
       "name": "银华海外数字经济量化选股混合发起式(QDII)A",
       "created_at": "2026-08-27 09:21:34"
     },
     {
-      "id": 17,
+      "id": 41,
       "market": "FUND",
       "code": "016453",
       "name": "南方纳斯达克100指数发起(QDII)C",
       "created_at": "2026-08-27 09:21:34"
     },
     {
-      "id": 18,
+      "id": 42,
       "market": "FUND",
       "code": "016452",
       "name": "南方纳斯达克100指数发起(QDII)A",
       "created_at": "2026-08-27 09:21:34"
     },
     {
-      "id": 19,
+      "id": 43,
       "market": "FUND",
       "code": "019172",
       "name": "摩根纳斯达克100指数(QDII)人民币A",
       "created_at": "2026-08-27 09:22:11"
     },
     {
-      "id": 20,
+      "id": 44,
       "market": "FUND",
       "code": "021662",
       "name": "国富亚洲机会股票(QDII)C",
       "created_at": "2026-08-27 09:24:03"
     },
     {
-      "id": 21,
+      "id": 45,
       "market": "FUND",
       "code": "016664",
       "name": "天弘全球高端制造混合(QDII)A",
       "created_at": "2026-08-27 09:24:03"
     },
     {
-      "id": 22,
+      "id": 46,
       "market": "FUND",
       "code": "457001",
       "name": "国富亚洲机会股票(QDII)A",
       "created_at": "2026-08-27 09:24:03"
     },
     {
-      "id": 23,
+      "id": 47,
       "market": "FUND",
       "code": "017811",
       "name": "东方人工智能主题混合C",
       "created_at": "2026-08-27 09:24:27"
     },
     {
-      "id": 24,
+      "id": 48,
       "market": "FUND",
       "code": "017437",
       "name": "华宝纳斯达克精选股票发起式(QDII)C",
       "created_at": "2026-08-28 15:51:23"
     }
   ],
-  "transactions": [],
+  "transactions": [
+    {
+      "id": 5,
+      "market": "FUND",
+      "code": "011452",
+      "side": "SELL",
+      "quantity": 325.0,
+      "price": 3.0504,
+      "fee": 0.0,
+      "trans_date": "2026-09-17",
+      "note": "[15:00前 确认2026-09-18]",
+      "created_at": "2026-09-18 10:02:41",
+      "nav_date": "",
+      "price_status": "settled",
+      "pricePending": false
+    }
+  ],
   "snapshots": [
     {
-      "id": 2,
+      "id": 17,
       "snap_date": "2026-08-26",
       "total_market_value": 0.0,
       "total_cost": 0.0,
@@ -184,7 +200,7 @@
       "total_cum_pnl": null
     },
     {
-      "id": 3,
+      "id": 18,
       "snap_date": "2026-08-27",
       "total_market_value": 353183.19,
       "total_cost": 272640.0,
@@ -193,7 +209,7 @@
       "total_cum_pnl": null
     },
     {
-      "id": 4,
+      "id": 19,
       "snap_date": "2026-08-28",
       "total_market_value": 425258.65,
       "total_cost": 340472.22,
@@ -202,7 +218,7 @@
       "total_cum_pnl": null
     },
     {
-      "id": 5,
+      "id": 20,
       "snap_date": "2026-08-31",
       "total_market_value": 414731.25,
       "total_cost": 340572.22,
@@ -211,7 +227,7 @@
       "total_cum_pnl": 87856.96
     },
     {
-      "id": 6,
+      "id": 21,
       "snap_date": "2026-09-01",
       "total_market_value": 410185.45,
       "total_cost": 340572.22,
@@ -220,7 +236,7 @@
       "total_cum_pnl": 83311.16
     },
     {
-      "id": 7,
+      "id": 22,
       "snap_date": "2026-09-02",
       "total_market_value": 401955.54,
       "total_cost": 342490.21,
@@ -229,7 +245,7 @@
       "total_cum_pnl": 73163.26
     },
     {
-      "id": 8,
+      "id": 23,
       "snap_date": "2026-09-03",
       "total_market_value": 407318.17,
       "total_cost": 342490.21,
@@ -238,7 +254,7 @@
       "total_cum_pnl": 78525.89
     },
     {
-      "id": 9,
+      "id": 24,
       "snap_date": "2026-09-04",
       "total_market_value": 415518.38,
       "total_cost": 342490.21,
@@ -247,7 +263,7 @@
       "total_cum_pnl": 86726.1
     },
     {
-      "id": 10,
+      "id": 25,
       "snap_date": "2026-09-07",
       "total_market_value": 409969.93,
       "total_cost": 342490.21,
@@ -256,7 +272,7 @@
       "total_cum_pnl": 81177.65
     },
     {
-      "id": 11,
+      "id": 26,
       "snap_date": "2026-09-08",
       "total_market_value": 411104.57,
       "total_cost": 342490.21,
@@ -265,7 +281,7 @@
       "total_cum_pnl": 82312.29
     },
     {
-      "id": 12,
+      "id": 27,
       "snap_date": "2026-09-10",
       "total_market_value": 410224.83,
       "total_cost": 342490.21,
@@ -274,7 +290,7 @@
       "total_cum_pnl": 81432.55
     },
     {
-      "id": 13,
+      "id": 28,
       "snap_date": "2026-09-11",
       "total_market_value": 405276.98,
       "total_cost": 342490.21,
@@ -283,23 +299,59 @@
       "total_cum_pnl": 76484.7
     },
     {
-      "id": 14,
+      "id": 29,
       "snap_date": "2026-09-14",
       "total_market_value": 405511.72,
       "total_cost": 342490.21,
       "cash": 0.0,
       "created_at": "2026-09-14 08:38:30",
       "total_cum_pnl": 76719.44
+    },
+    {
+      "id": 30,
+      "snap_date": "2026-09-15",
+      "total_market_value": 404073.57,
+      "total_cost": 344362.25,
+      "cash": 0.0,
+      "created_at": "2026-09-15 08:47:12",
+      "total_cum_pnl": 73409.25
+    },
+    {
+      "id": 31,
+      "snap_date": "2026-09-16",
+      "total_market_value": 404906.31,
+      "total_cost": 344362.25,
+      "cash": 0.0,
+      "created_at": "2026-09-16 08:50:41",
+      "total_cum_pnl": 74241.99
+    },
+    {
+      "id": 32,
+      "snap_date": "2026-09-17",
+      "total_market_value": 403458.8,
+      "total_cost": 344362.25,
+      "cash": 0.0,
+      "created_at": "2026-09-17 08:59:29",
+      "total_cum_pnl": 72794.48
+    },
+    {
+      "id": 33,
+      "snap_date": "2026-09-18",
+      "total_market_value": 404921.34,
+      "total_cost": 343361.53,
+      "cash": 0.0,
+      "created_at": "2026-09-18 08:33:32",
+      "total_cum_pnl": 75248.4
     }
   ],
   "gold_holding": {
     "grams": 354.002,
     "cost_price": 767.0579,
-    "updated_at": "2026-09-14 13:09:37"
+    "updated_at": "2026-09-16 15:04:52"
   },
   "gold_transactions": [
     {
-      "id": 1,
+      "id": 4,
       "side": "BUY",
       "grams": 350.0,
       "price": 765.0,
@@ -308,7 +360,7 @@
       "created_at": "2026-08-26 16:57:15"
     },
     {
-      "id": 2,
+      "id": 5,
       "side": "BUY",
       "grams": 2.0014,
       "price": 958.33,
@@ -317,7 +369,7 @@
       "created_at": "2026-09-01 15:20:45"
     },
     {
-      "id": 3,
+      "id": 6,
       "side": "BUY",
       "grams": 2.0006,
       "price": 935.74,
@@ -525,7 +577,7 @@
   ],
   "custom_indices": [
     {
-      "id": 11,
+      "id": 24,
       "name": "上证指数",
       "market": "A",
       "code": "sh000001",
@@ -533,7 +585,7 @@
       "created_at": "2026-08-26 09:05:34"
     },
     {
-      "id": 12,
+      "id": 25,
       "name": "科创综指",
       "market": "A",
       "code": "sh000680",
@@ -541,7 +593,7 @@
       "created_at": "2026-08-27 09:35:15"
     },
     {
-      "id": 13,
+      "id": 26,
       "name": "红利低波50ETF南方",
       "market": "A",
       "code": "sh515450",
@@ -549,7 +601,7 @@
       "created_at": "2026-09-02 13:17:58"
     },
     {
-      "id": 14,
+      "id": 27,
       "name": "通信ETF国泰",
       "market": "A",
       "code": "sh515880",
@@ -557,7 +609,7 @@
       "created_at": "2026-09-02 13:15:22"
     },
     {
-      "id": 15,
+      "id": 28,
       "name": "半导体设备ETF招商",
       "market": "A",
       "code": "sh561980",
@@ -565,7 +617,7 @@
       "created_at": "2026-09-02 13:13:56"
     },
     {
-      "id": 16,
+      "id": 29,
       "name": "科创芯片ETF嘉实",
       "market": "A",
       "code": "sh588200",
@@ -573,7 +625,7 @@
       "created_at": "2026-09-02 13:12:37"
     },
     {
-      "id": 17,
+      "id": 30,
       "name": "机器人E",
       "market": "A",
       "code": "sz159530",
@@ -581,7 +633,7 @@
       "created_at": "2026-08-28 10:12:42"
     },
     {
-      "id": 18,
+      "id": 31,
       "name": "稀金属",
       "market": "A",
       "code": "sz159671",
@@ -589,7 +641,7 @@
       "created_at": "2026-08-28 09:35:45"
     },
     {
-      "id": 19,
+      "id": 32,
       "name": "纽约金",
       "market": "GOLD",
       "code": "hf_GC",
@@ -597,7 +649,7 @@
       "created_at": "2026-08-27 17:20:20"
     },
     {
-      "id": 20,
+      "id": 33,
       "name": "沪金",
       "market": "GOLD",
       "code": "nf_AU0",
@@ -605,7 +657,7 @@
       "created_at": "2026-08-28 08:38:35"
     },
     {
-      "id": 21,
+      "id": 34,
       "name": "标普500",
       "market": "US",
       "code": "inx",
@@ -613,7 +665,7 @@
       "created_at": "2026-08-26 09:05:34"
     },
     {
-      "id": 22,
+      "id": 35,
       "name": "纳斯达克",
       "market": "US",
       "code": "ixic",
@@ -621,7 +673,7 @@
       "created_at": "2026-08-26 09:05:34"
     },
     {
-      "id": 23,
+      "id": 36,
       "name": "费城半导体",
       "market": "US",
       "code": "sox",
@@ -2423,6 +2475,606 @@
       "market": "GOLD",
       "code": "GOLD_PHYSICAL",
       "market_value": 332493.48
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "000218",
+      "market_value": 46355.6
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "002891",
+      "market_value": 1769.85
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "008254",
+      "market_value": 2123.56
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "011452",
+      "market_value": 1895.33
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "012752",
+      "market_value": 465.28
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "016452",
+      "market_value": 1336.28
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "016453",
+      "market_value": 1497.81
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "016664",
+      "market_value": 453.0
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "016665",
+      "market_value": 601.86
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "016701",
+      "market_value": 1815.32
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "016702",
+      "market_value": 4719.45
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "017437",
+      "market_value": 95.93
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "017470",
+      "market_value": 361.86
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "017654",
+      "market_value": 882.33
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "017811",
+      "market_value": 375.46
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "018147",
+      "market_value": 1218.78
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "019088",
+      "market_value": 1834.66
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "019172",
+      "market_value": 946.68
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "020840",
+      "market_value": 367.54
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "020973",
+      "market_value": 921.99
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "021277",
+      "market_value": 484.59
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "021662",
+      "market_value": 633.91
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "457001",
+      "market_value": 441.19
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "FUND",
+      "code": "539001",
+      "market_value": 1186.08
+    },
+    {
+      "snap_date": "2026-09-15",
+      "market": "GOLD",
+      "code": "GOLD_PHYSICAL",
+      "market_value": 331289.23
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "000218",
+      "market_value": 46107.74
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "002891",
+      "market_value": 1676.46
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "008254",
+      "market_value": 2054.67
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "011452",
+      "market_value": 1884.74
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "012752",
+      "market_value": 461.16
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "016452",
+      "market_value": 1324.85
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "016453",
+      "market_value": 1485.01
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "016664",
+      "market_value": 431.12
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "016665",
+      "market_value": 572.77
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "016701",
+      "market_value": 1776.57
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "016702",
+      "market_value": 4618.46
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "017437",
+      "market_value": 93.6
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "017470",
+      "market_value": 368.51
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "017654",
+      "market_value": 839.41
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "017811",
+      "market_value": 388.46
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "018147",
+      "market_value": 1157.77
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "019088",
+      "market_value": 1831.4
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "019172",
+      "market_value": 938.75
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "020840",
+      "market_value": 378.55
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "020973",
+      "market_value": 912.13
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "021277",
+      "market_value": 471.83
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "021662",
+      "market_value": 616.85
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "457001",
+      "market_value": 429.33
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "FUND",
+      "code": "539001",
+      "market_value": 1175.61
+    },
+    {
+      "snap_date": "2026-09-16",
+      "market": "GOLD",
+      "code": "GOLD_PHYSICAL",
+      "market_value": 332910.56
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "000218",
+      "market_value": 46519.46
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "002891",
+      "market_value": 1671.23
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "008254",
+      "market_value": 2051.86
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "011452",
+      "market_value": 1963.72
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "012752",
+      "market_value": 458.28
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "016452",
+      "market_value": 1316.05
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "016453",
+      "market_value": 1475.17
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "016664",
+      "market_value": 431.7
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "016665",
+      "market_value": 573.53
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "016701",
+      "market_value": 1771.47
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "016702",
+      "market_value": 4605.22
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "017437",
+      "market_value": 92.92
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "017470",
+      "market_value": 385.95
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "017654",
+      "market_value": 843.99
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "017811",
+      "market_value": 407.66
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "018147",
+      "market_value": 1150.08
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "019088",
+      "market_value": 1853.86
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "019172",
+      "market_value": 932.67
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "020840",
+      "market_value": 396.28
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "020973",
+      "market_value": 920.88
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "021277",
+      "market_value": 469.71
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "021662",
+      "market_value": 610.41
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "457001",
+      "market_value": 424.86
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "FUND",
+      "code": "539001",
+      "market_value": 1168.29
+    },
+    {
+      "snap_date": "2026-09-17",
+      "market": "GOLD",
+      "code": "GOLD_PHYSICAL",
+      "market_value": 330963.55
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "000218",
+      "market_value": 46425.82
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "002891",
+      "market_value": 1701.93
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "008254",
+      "market_value": 2066.56
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "011452",
+      "market_value": 989.95
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "012752",
+      "market_value": 458.16
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "016452",
+      "market_value": 1315.59
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "016453",
+      "market_value": 1474.58
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "016664",
+      "market_value": 442.89
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "016665",
+      "market_value": 588.38
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "016701",
+      "market_value": 1780.74
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "016702",
+      "market_value": 4629.24
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "017437",
+      "market_value": 93.28
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "017470",
+      "market_value": 383.99
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "017654",
+      "market_value": 860.75
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "017811",
+      "market_value": 409.59
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "018147",
+      "market_value": 1163.92
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "019088",
+      "market_value": 1830.05
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "019172",
+      "market_value": 932.35
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "020840",
+      "market_value": 395.64
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "020973",
+      "market_value": 932.0
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "021277",
+      "market_value": 472.59
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "021662",
+      "market_value": 618.35
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "457001",
+      "market_value": 430.38
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "FUND",
+      "code": "539001",
+      "market_value": 1168.01
+    },
+    {
+      "snap_date": "2026-09-18",
+      "market": "GOLD",
+      "code": "GOLD_PHYSICAL",
+      "market_value": 333356.6
     }
   ],
   "pnl_override": [
@@ -2444,7 +3096,7 @@
     }
   ],
   "settings": {
-    "auto_export_last_run": "2026-09-14 14:45:44",
-    "auto_export_last_date": "2026-09-14"
+    "auto_export_last_run": "2026-09-18 06:00:00",
+    "auto_export_last_date": "2026-09-18"
   }
 }
